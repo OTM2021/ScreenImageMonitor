@@ -36,13 +36,22 @@ ThresholdMode = Literal["none", "otsu", "adaptive"]
 
 
 def application_directory() -> Path:
-    """Return the directory containing the executable or source file."""
+    """Return the writable directory containing the executable or source file."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
 
+def resource_directory() -> Path:
+    """Return the PyInstaller extraction directory or source directory."""
+    bundle_path = getattr(sys, "_MEIPASS", None)
+    if bundle_path:
+        return Path(bundle_path).resolve()
+    return Path(__file__).resolve().parent
+
+
 APP_DIR = application_directory()
+RESOURCE_DIR = resource_directory()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "monitor.log"
 
@@ -613,28 +622,31 @@ def clear_counts(
 
 
 def configure_tesseract() -> Path:
-    bundled = APP_DIR / "tesseract" / "tesseract.exe"
-    configured: Path | None = None
+    candidates = [
+        RESOURCE_DIR / "tesseract" / "tesseract.exe",
+        APP_DIR / "tesseract" / "tesseract.exe",
+        Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
+    ]
 
-    if bundled.exists():
-        configured = bundled
-    else:
-        found = shutil.which("tesseract")
-        if found:
-            configured = Path(found)
+    found = shutil.which("tesseract")
+    if found:
+        candidates.append(Path(found))
 
+    configured = next((path for path in candidates if path.exists()), None)
     if configured is None:
         raise FileNotFoundError(
-            "Tesseract OCR was not found. Keep the bundled 'tesseract' folder "
-            "next to ScreenImageMonitor.exe, or install Tesseract and add it to PATH."
+            "Tesseract OCRを起動できません。修正版のGitHub ActionsでEXEを再ビルドしてください。"
         )
 
     pytesseract.pytesseract.tesseract_cmd = str(configured)
 
     tessdata = configured.parent / "tessdata"
-    if tessdata.exists():
-        os.environ["TESSDATA_PREFIX"] = str(tessdata)
+    if not tessdata.exists():
+        raise FileNotFoundError(
+            f"Tesseractの言語データがありません: {tessdata}"
+        )
 
+    os.environ["TESSDATA_PREFIX"] = str(tessdata)
     return configured
 
 
@@ -1251,11 +1263,17 @@ def main() -> int:
         return 0
     except Exception as error:
         log(f"ERROR: {error}")
-        print()
-        print("Correct config.json and required files, then start again.")
+        # A --windowed executable has no stdin. Show a Windows dialog instead
+        # of calling input(), which would raise "lost sys.stdin".
         try:
-            input("Press Enter to close...")
-        except EOFError:
+            import tkinter as tk
+            from tkinter import messagebox
+
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("ScreenImageMonitor", str(error), parent=root)
+            root.destroy()
+        except Exception:
             pass
         return 1
 
