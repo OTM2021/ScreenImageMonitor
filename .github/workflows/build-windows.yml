@@ -1,0 +1,158 @@
+name: Build Windows Integrated GUI EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Install Tesseract OCR for bundling
+        shell: powershell
+        run: |
+          choco install tesseract --yes --no-progress
+          $validExitCodes = @(0, 1641, 3010)
+          if ($validExitCodes -notcontains $LASTEXITCODE) {
+            throw "Tesseract installation failed: $LASTEXITCODE"
+          }
+
+          $candidates = @(
+            "C:\Program Files\Tesseract-OCR\tesseract.exe",
+            "C:\tools\tesseract\tesseract.exe"
+          )
+          $tesseractExe = $candidates |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+
+          if (-not $tesseractExe) {
+            $tesseractExe = Get-ChildItem "C:\Program Files", "C:\tools" `
+              -Filter tesseract.exe -Recurse -ErrorAction SilentlyContinue `
+              | Select-Object -First 1 -ExpandProperty FullName
+          }
+
+          if (-not $tesseractExe) {
+            throw "tesseract.exe was not found after installation."
+          }
+
+          $tesseractDir = Split-Path $tesseractExe -Parent
+          if (-not (Test-Path "$tesseractDir\tessdata\eng.traineddata")) {
+            throw "eng.traineddata was not found: $tesseractDir\tessdata"
+          }
+
+          "TESSERACT_EXE=$tesseractExe" | Out-File $env:GITHUB_ENV -Append
+          "TESSERACT_DIR=$tesseractDir" | Out-File $env:GITHUB_ENV -Append
+          & $tesseractExe --version
+
+      - name: Verify source and imports
+        shell: powershell
+        run: |
+          python -m py_compile `
+            screen_image_monitor.py `
+            screen_setup_gui.py `
+            screen_image_monitor_gui.py
+
+          python -c "import tkinter; from PIL import Image, ImageTk; import cv2, mss, numpy, pytesseract, PyInstaller; print('Import check OK')"
+          python -c "import screen_image_monitor as app; c=app.load_config(); print('rules=', len(c.rules), 'mode=', c.coordinate_mode)"
+
+      - name: Build one-file GUI EXE with embedded Tesseract
+        shell: powershell
+        run: |
+          $tesseractData = "${env:TESSERACT_DIR}:tesseract"
+          Write-Host "Embedding Tesseract from: $env:TESSERACT_DIR"
+
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --noupx `
+            --name ScreenImageMonitor `
+            --add-data $tesseractData `
+            --collect-all numpy `
+            --collect-all cv2 `
+            --collect-all pytesseract `
+            --collect-all PIL `
+            --hidden-import mss.windows `
+            --hidden-import screen_image_monitor `
+            --hidden-import screen_setup_gui `
+            --hidden-import tkinter `
+            --hidden-import PIL._tkinter_finder `
+            screen_image_monitor_gui.py
+
+      - name: Verify generated EXE
+        shell: powershell
+        run: |
+          $exe = "dist\ScreenImageMonitor.exe"
+          if (-not (Test-Path $exe)) {
+            throw "ScreenImageMonitor.exe is missing."
+          }
+
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw "Generated file is not a Windows executable."
+          }
+
+          $archive = (& pyi-archive_viewer -l $exe 2>&1 | Out-String)
+          if ($archive -notmatch "tesseract[\\/]tesseract.exe") {
+            Write-Host $archive
+            throw "Embedded tesseract.exe was not found in the PyInstaller archive."
+          }
+          if ($archive -notmatch "tesseract[\\/]tessdata[\\/]eng.traineddata") {
+            Write-Host $archive
+            throw "Embedded eng.traineddata was not found in the PyInstaller archive."
+          }
+
+          Get-Item $exe | Select-Object FullName, Length
+
+      - name: Prepare distributable package
+        shell: powershell
+        run: |
+          $package = "package"
+          New-Item -ItemType Directory -Path $package -Force | Out-Null
+
+          foreach ($directory in @("templates", "sounds", "samples", "evidence")) {
+            New-Item -ItemType Directory -Path "$package\$directory" -Force | Out-Null
+          }
+
+          Copy-Item "dist\ScreenImageMonitor.exe" "$package\"
+          Copy-Item "config.json" "$package\"
+          Copy-Item "README.md" "$package\"
+
+          foreach ($directory in @("templates", "sounds", "samples", "evidence")) {
+            if (Test-Path $directory) {
+              Copy-Item "$directory\*" "$package\$directory\" -Recurse -Force
+            }
+          }
+
+          Get-ChildItem $package -Recurse | Select-Object FullName, Length
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v6
+        with:
+          name: ScreenImageMonitor-Windows-GUI-v2
+          path: package
+          if-no-files-found: error
+          retention-days: 14
