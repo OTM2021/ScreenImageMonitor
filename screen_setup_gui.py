@@ -19,6 +19,7 @@ from tkinter import messagebox, simpledialog, ttk
 
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
 CONFIG_PATH = APP_DIR / "config.json"
 COUNT_PATH = APP_DIR / "counts.json"
 
@@ -66,6 +67,7 @@ def save_json(path: Path, data: Any) -> None:
 
 def configure_tesseract() -> Path | None:
     candidates = [
+        RESOURCE_DIR / "tesseract" / "tesseract.exe",
         APP_DIR / "tesseract" / "tesseract.exe",
         Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
     ]
