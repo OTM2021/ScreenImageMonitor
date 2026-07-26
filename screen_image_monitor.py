@@ -646,7 +646,7 @@ def configure_tesseract() -> Path:
             f"Tesseractの言語データがありません: {tessdata}"
         )
 
-    os.environ["TESSDATA_PREFIX"] = str(tessdata)
+    os.environ["TESSDATA_PREFIX"] = os.path.normpath(str(tessdata))
     return configured
 
 
@@ -792,14 +792,14 @@ def recognize_number(frame: np.ndarray, rule: Rule) -> tuple[float | None, str]:
         cropped = crop_number_region(frame, rule.number_region)
     processed = preprocess_number_image(cropped, rule.ocr)
 
-    tessdata = Path(pytesseract.pytesseract.tesseract_cmd).parent / "tessdata"
-    tessdata_argument = (
-        f' --tessdata-dir "{tessdata}"' if tessdata.exists() else ""
-    )
+    # TESSDATA_PREFIX is configured by configure_tesseract().
+    # Do not append --tessdata-dir with a quoted Windows path here.
+    # pytesseract/shlex can preserve those quote characters on Windows,
+    # causing Tesseract to look for a path such as:
+    #   "C:\\...\\tessdata"/eng.traineddata
     config = (
         f"--oem 1 --psm {rule.ocr.psm}"
         f" -c tessedit_char_whitelist={rule.ocr.whitelist}"
-        f"{tessdata_argument}"
     )
 
     try:

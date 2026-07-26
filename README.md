@@ -1,4 +1,5 @@
-# v2 修正点
+# ScreenImageMonitor 統合GUI OCR版 v3
+
 
 - Tesseract OCR本体と英語数字認識データを`ScreenImageMonitor.exe`内部へ同梱します。
 - 配布先に`tesseract`フォルダーを置く必要はありません。
@@ -179,3 +180,11 @@ GUIで領域をできるだけ数字だけに絞ってください。背景や�
 - Windowsの表示倍率変更後やモニター配置変更後はGUIで領域を再選択してください。
 - 対象ウィンドウが最小化されている場合や、他のウィンドウに隠れている場合は、画面上に見えている内容を取得します。
 - 画像一致ではアニメーション、時刻、カーソルなど変化する部分をテンプレートに含めないでください。
+
+
+## v3修正
+
+- OCR実行時の `--tessdata-dir` 引数を削除しました。
+- Tesseractの言語データは `TESSDATA_PREFIX` だけで指定します。
+- Windowsパスに引用符が混入し、`".../tessdata"/eng.traineddata` を探す問題を修正しました。
+- GitHub ActionsにOCRスモークテストを追加しました。

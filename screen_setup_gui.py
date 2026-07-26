@@ -80,7 +80,7 @@ def configure_tesseract() -> Path | None:
             pytesseract.pytesseract.tesseract_cmd = str(candidate)
             tessdata = candidate.parent / "tessdata"
             if tessdata.exists():
-                os.environ["TESSDATA_PREFIX"] = str(tessdata)
+                os.environ["TESSDATA_PREFIX"] = os.path.normpath(str(tessdata))
             return candidate
     return None
 
