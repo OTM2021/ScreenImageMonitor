@@ -77,6 +77,10 @@ jobs:
           python -c "import tkinter; from PIL import Image, ImageTk; import cv2, mss, numpy, pytesseract, PyInstaller; print('Import check OK')"
           python -c "import screen_image_monitor as app; c=app.load_config(); print('rules=', len(c.rules), 'mode=', c.coordinate_mode)"
 
+      - name: Run OCR smoke test
+        shell: powershell
+        run: python ocr_smoke_test.py
+
       - name: Build one-file GUI EXE with embedded Tesseract
         shell: powershell
         run: |
@@ -152,7 +156,7 @@ jobs:
       - name: Upload Windows package
         uses: actions/upload-artifact@v6
         with:
-          name: ScreenImageMonitor-Windows-GUI-v2
+          name: ScreenImageMonitor-Windows-GUI-v3
           path: package
           if-no-files-found: error
           retention-days: 14
