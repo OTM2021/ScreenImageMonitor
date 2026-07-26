@@ -116,11 +116,11 @@ jobs:
           }
 
           $archive = (& pyi-archive_viewer -l $exe 2>&1 | Out-String)
-          if ($archive -notmatch "tesseract[\\/]tesseract.exe") {
+          if ($archive -notmatch 'tesseract(?:\\+|/+)tesseract\.exe') {
             Write-Host $archive
             throw "Embedded tesseract.exe was not found in the PyInstaller archive."
           }
-          if ($archive -notmatch "tesseract[\\/]tessdata[\\/]eng.traineddata") {
+          if ($archive -notmatch 'tesseract(?:\\+|/+)tessdata(?:\\+|/+)eng\.traineddata') {
             Write-Host $archive
             throw "Embedded eng.traineddata was not found in the PyInstaller archive."
           }
