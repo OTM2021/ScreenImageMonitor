@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+.venv/
+venv/
+counts.json
+monitor.log
+evidence/**/*.png
+samples/*.png
