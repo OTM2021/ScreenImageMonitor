@@ -1,40 +1,84 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
-
-name: Python package
+name: Build Windows EXE
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.9", "3.10", "3.11"]
+    runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install flake8 pytest
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    - name: Test with pytest
-      run: |
-        pytest
+      - name: Checkout source
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Check Python source
+        shell: powershell
+        run: |
+          python -m py_compile screen_image_monitor.py
+
+      - name: Build EXE
+        shell: powershell
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --noupx `
+            --name ScreenImageMonitor `
+            --collect-all numpy `
+            --collect-all cv2 `
+            --collect-all PIL `
+            --hidden-import mss.windows `
+            --hidden-import tkinter `
+            screen_image_monitor.py
+
+      - name: Prepare package
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Path package -Force
+
+          Copy-Item dist\ScreenImageMonitor.exe package\
+          Copy-Item config.json package\ -ErrorAction SilentlyContinue
+          Copy-Item README.md package\ -ErrorAction SilentlyContinue
+
+          $folders = @(
+            "templates",
+            "samples",
+            "sounds",
+            "evidence",
+            "tesseract"
+          )
+
+          foreach ($folder in $folders) {
+            if (Test-Path $folder) {
+              Copy-Item $folder "package\$folder" -Recurse -Force
+            }
+          }
+
+          Write-Host "Package contents:"
+          Get-ChildItem package -Recurse
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenImageMonitor-Windows
+          path: package
+          if-no-files-found: error
+          retention-days: 14
