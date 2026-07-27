@@ -26,6 +26,9 @@ def main() -> None:
     assert "数値音通知追加" not in setup_text
     assert "画像音通知追加" not in setup_text
     assert "カウントアップ時に音通知する" in setup_text
+    assert "OCR結果に指定範囲の数値を含む" in setup_text
+    assert "範囲は 1-10 のように入力します" in setup_text
+    assert 'values=("eq", "ne", "gt"' not in setup_text
 
     print("Detector UI separation and action integration check OK")
 

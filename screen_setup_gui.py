@@ -19,12 +19,113 @@ import tkinter as tk
 from PIL import Image, ImageDraw, ImageTk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from image_file_io import read_cv_image
+
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
 CONFIG_PATH = APP_DIR / "config.json"
 COUNT_PATH = APP_DIR / "counts.json"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+
+NUMBER_OPERATOR_LABELS: dict[str, str] = {
+    "指定した数値と同じ": "eq",
+    "指定した数値と異なる": "ne",
+    "指定した数値より大きい": "gt",
+    "指定した数値以上": "ge",
+    "指定した数値より小さい": "lt",
+    "指定した数値以下": "le",
+    "指定範囲内": "between",
+    "OCR結果に指定範囲の数値を含む": "contains_range",
+    "前回から数値が変わった": "changed",
+    "前回より数値が増えた": "increase",
+    "前回より数値が減った": "decrease",
+}
+NUMBER_OPERATOR_CODES = {code: label for label, code in NUMBER_OPERATOR_LABELS.items()}
+VALUE_OPERATORS = {"eq", "ne", "gt", "ge", "lt", "le"}
+RANGE_OPERATORS = {"between", "contains_range"}
+NUMBER_PATTERN = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
+RANGE_INPUT_PATTERN = re.compile(
+    r"^\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*"
+    r"(?:-|～|〜|~|,|，)\s*"
+    r"([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*$"
+)
+
+
+def format_number(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "0"
+    return f"{number:g}"
+
+
+def format_range(minimum: Any, maximum: Any) -> str:
+    return f"{format_number(minimum)}-{format_number(maximum)}"
+
+
+def parse_range_input(value: str) -> tuple[float, float]:
+    normalized = value.strip().replace("．", ".")
+    match = RANGE_INPUT_PATTERN.fullmatch(normalized)
+    if match is None:
+        raise ValueError("範囲は 1-10 の形式で入力してください。")
+    minimum = float(match.group(1))
+    maximum = float(match.group(2))
+    if minimum > maximum:
+        raise ValueError("範囲の左側は右側以下にしてください。")
+    return minimum, maximum
+
+
+def parse_ocr_numbers(text: str) -> list[float]:
+    values: list[float] = []
+    for matched in NUMBER_PATTERN.findall(text):
+        try:
+            values.append(float(matched.replace(",", ".")))
+        except ValueError:
+            continue
+    return values
+
+
+def number_matches_threshold(value: float, condition: dict[str, Any]) -> bool:
+    operator = str(condition.get("operator", "eq"))
+    tolerance = float(condition.get("tolerance", 0) or 0)
+    if operator == "eq":
+        return abs(value - float(condition.get("value", 0))) <= tolerance
+    if operator == "ne":
+        return abs(value - float(condition.get("value", 0))) > tolerance
+    if operator == "gt":
+        return value > float(condition.get("value", 0)) + tolerance
+    if operator == "ge":
+        return value >= float(condition.get("value", 0)) - tolerance
+    if operator == "lt":
+        return value < float(condition.get("value", 0)) - tolerance
+    if operator == "le":
+        return value <= float(condition.get("value", 0)) + tolerance
+    if operator in RANGE_OPERATORS:
+        minimum = float(condition.get("minimum", 0))
+        maximum = float(condition.get("maximum", 0))
+        return minimum - tolerance <= value <= maximum + tolerance
+    return False
+
+
+def test_ocr_condition(
+    text: str, condition: dict[str, Any], number_index: int = 0
+) -> tuple[bool | None, float | None]:
+    operator = str(condition.get("operator", "increase"))
+    if operator in {"changed", "increase", "decrease"}:
+        return None, None
+
+    numbers = parse_ocr_numbers(text)
+    if operator == "contains_range":
+        for candidate in numbers:
+            if number_matches_threshold(candidate, condition):
+                return True, candidate
+        return False, None
+
+    if number_index < 0 or number_index >= len(numbers):
+        return False, None
+    candidate = numbers[number_index]
+    return number_matches_threshold(candidate, condition), candidate
 
 
 def set_dpi_awareness() -> None:
@@ -66,6 +167,7 @@ def save_json(path: Path, data: Any) -> None:
         json.dump(data, file, ensure_ascii=False, indent=2)
         file.write("\n")
     temporary.replace(path)
+
 
 
 def configure_tesseract() -> Path | None:
@@ -132,12 +234,11 @@ def capture_region(region: dict[str, int]) -> Image.Image:
 
 
 class RegionSelector:
-    """Select an exact desktop region on a full-monitor overlay.
+    """Select a desktop region on a full-monitor overlay.
 
-    In normal source tests this can still be hosted by a Toplevel.  The
-    production GUI launches it in a separate process and uses that process's
-    Tk root as the overlay, avoiding modal-grab and withdrawn-parent issues on
-    Windows.
+    Number OCR rules use free drag selection. Image rules may pass ``fixed_size``
+    so the selector always returns a region with exactly the same width and
+    height as the registered PNG/JPEG template.
     """
 
     def __init__(
@@ -145,6 +246,7 @@ class RegionSelector:
         parent: tk.Misc,
         monitor: dict[str, int],
         *,
+        fixed_size: tuple[int, int] | None = None,
         use_parent_window: bool = False,
         restore_parent: bool = True,
     ) -> None:
@@ -153,6 +255,19 @@ class RegionSelector:
         self.restore_parent = restore_parent
         self.use_parent_window = use_parent_window
         self.monitor = {key: int(value) for key, value in monitor.items()}
+        self.fixed_size = fixed_size
+        if self.fixed_size is not None:
+            fixed_width, fixed_height = self.fixed_size
+            if fixed_width < 1 or fixed_height < 1:
+                raise ValueError("fixed selection dimensions must be positive")
+            if (
+                fixed_width > self.monitor["width"]
+                or fixed_height > self.monitor["height"]
+            ):
+                raise ValueError(
+                    "registered image is larger than the selected monitor"
+                )
+
         original = capture_region(self.monitor).convert("RGB")
         shade = Image.new("RGB", original.size, (0, 0, 0))
         self.original = Image.blend(original, shade, 0.30)
@@ -195,31 +310,57 @@ class RegionSelector:
         self.canvas.create_rectangle(
             16,
             16,
-            min(width - 16, 780),
+            min(width - 16, 920),
             78,
             fill="#101010",
             outline="#ffffff",
             width=2,
         )
+        if self.fixed_size is None:
+            instruction = (
+                "監視する範囲をドラッグしてください。マウスを離すと確定します。"
+                "Esc／右クリックで取消。"
+            )
+        else:
+            fixed_width, fixed_height = self.fixed_size
+            instruction = (
+                f"登録画像と同じ {fixed_width} x {fixed_height} の枠を移動します。"
+                "監視位置を左クリックで確定。Esc／右クリックで取消。"
+            )
         self.canvas.create_text(
             32,
             47,
             anchor="w",
             fill="#ffffff",
             font=("Yu Gothic UI", 14, "bold"),
-            text="監視する範囲をドラッグしてください。マウスを離すと確定します。Esc／右クリックで取消。",
+            text=instruction,
         )
 
         self.start_x = 0
         self.start_y = 0
         self.end_x = 0
         self.end_y = 0
+        self.fixed_left = 0
+        self.fixed_top = 0
         self.rect_id: int | None = None
         self.confirm_pending = False
 
-        self.canvas.bind("<ButtonPress-1>", self._press)
-        self.canvas.bind("<B1-Motion>", self._drag)
-        self.canvas.bind("<ButtonRelease-1>", self._release)
+        if self.fixed_size is None:
+            self.canvas.bind("<ButtonPress-1>", self._press)
+            self.canvas.bind("<B1-Motion>", self._drag)
+            self.canvas.bind("<ButtonRelease-1>", self._release)
+        else:
+            self.rect_id = self.canvas.create_rectangle(
+                0,
+                0,
+                1,
+                1,
+                outline="#00ff60",
+                width=4,
+            )
+            self._update_fixed_box(width // 2, height // 2)
+            self.canvas.bind("<Motion>", self._move_fixed)
+            self.canvas.bind("<ButtonPress-1>", self._select_fixed)
         self.canvas.bind("<Button-3>", lambda _event: self._cancel())
         self.window.bind("<Escape>", lambda _event: self._cancel())
         self.window.protocol("WM_DELETE_WINDOW", self._cancel)
@@ -271,9 +412,9 @@ class RegionSelector:
             )
             return
         self.confirm_pending = True
-        self.window.after(60, self._confirm)
+        self.window.after(60, self._confirm_free)
 
-    def _confirm(self) -> None:
+    def _confirm_free(self) -> None:
         if not self.confirm_pending:
             return
         x1, x2 = sorted((self.start_x, self.end_x))
@@ -283,6 +424,47 @@ class RegionSelector:
             "top": self.monitor["top"] + y1,
             "width": max(1, x2 - x1),
             "height": max(1, y2 - y1),
+        }
+        self.window.destroy()
+
+    def _confirm(self) -> None:
+        """Backward-compatible alias for free-drag confirmation."""
+        self._confirm_free()
+
+    def _update_fixed_box(self, pointer_x: int, pointer_y: int) -> None:
+        if self.fixed_size is None:
+            return
+        fixed_width, fixed_height = self.fixed_size
+        max_left = self.monitor["width"] - fixed_width
+        max_top = self.monitor["height"] - fixed_height
+        self.fixed_left = max(0, min(int(pointer_x) - fixed_width // 2, max_left))
+        self.fixed_top = max(0, min(int(pointer_y) - fixed_height // 2, max_top))
+        if self.rect_id is not None:
+            self.canvas.coords(
+                self.rect_id,
+                self.fixed_left,
+                self.fixed_top,
+                self.fixed_left + fixed_width - 1,
+                self.fixed_top + fixed_height - 1,
+            )
+
+    def _move_fixed(self, event: tk.Event) -> None:
+        self._update_fixed_box(int(event.x), int(event.y))
+
+    def _select_fixed(self, event: tk.Event) -> None:
+        self._move_fixed(event)
+        self.confirm_pending = True
+        self.window.after(60, self._confirm_fixed)
+
+    def _confirm_fixed(self) -> None:
+        if not self.confirm_pending or self.fixed_size is None:
+            return
+        fixed_width, fixed_height = self.fixed_size
+        self.result = {
+            "left": self.monitor["left"] + self.fixed_left,
+            "top": self.monitor["top"] + self.fixed_top,
+            "width": fixed_width,
+            "height": fixed_height,
         }
         self.window.destroy()
 
@@ -324,15 +506,12 @@ class RegionSelector:
                     pass
 
 
-def run_region_selector_helper(monitor_json: str, result_path: str | Path) -> int:
-    """Run the range selector in a separate process.
-
-    A modal Tk grab in the settings window could prevent the in-process
-    borderless selector from becoming visible on some Windows systems.  The
-    helper owns an independent Tk interpreter and uses its root window as the
-    full-screen overlay, so no parent-window visibility or grab state can hide
-    it.
-    """
+def run_region_selector_helper(
+    monitor_json: str,
+    result_path: str | Path,
+    selector_options_json: str | None = None,
+) -> int:
+    """Run the range selector in a separate process."""
     output = Path(result_path)
     try:
         monitor_raw = json.loads(monitor_json)
@@ -345,6 +524,21 @@ def run_region_selector_helper(monitor_json: str, result_path: str | Path) -> in
         if monitor["width"] < 1 or monitor["height"] < 1:
             raise ValueError("monitor dimensions must be positive")
 
+        options: dict[str, Any] = {}
+        if selector_options_json:
+            loaded_options = json.loads(selector_options_json)
+            if not isinstance(loaded_options, dict):
+                raise ValueError("selector options must be a JSON object")
+            options = loaded_options
+
+        fixed_size: tuple[int, int] | None = None
+        if "fixed_width" in options or "fixed_height" in options:
+            fixed_width = int(options.get("fixed_width", 0))
+            fixed_height = int(options.get("fixed_height", 0))
+            if fixed_width < 1 or fixed_height < 1:
+                raise ValueError("fixed selection dimensions must be positive")
+            fixed_size = (fixed_width, fixed_height)
+
         set_dpi_awareness()
         root = tk.Tk()
         root.withdraw()
@@ -352,6 +546,7 @@ def run_region_selector_helper(monitor_json: str, result_path: str | Path) -> in
         selector = RegionSelector(
             root,
             monitor,
+            fixed_size=fixed_size,
             use_parent_window=True,
             restore_parent=False,
         )
@@ -505,7 +700,7 @@ class SetupApp:
         ttk.Button(
             self.template_frame,
             text="PNG/JPEGを登録...",
-            command=self._register_template_file,
+            command=lambda: self._register_template_file(select_region_after=True),
         ).grid(row=0, column=1, padx=(8, 0))
 
         self.options_frame = ttk.LabelFrame(right, text="判定条件", padding=8)
@@ -518,27 +713,44 @@ class SetupApp:
         self.number_options_frame.grid(row=0, column=0, sticky="ew")
         self.number_options_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(self.number_options_frame, text="数値条件").grid(row=0, column=0, sticky="w", pady=3)
-        self.operator_var = tk.StringVar(value="increase")
+        ttk.Label(self.number_options_frame, text="数値条件").grid(
+            row=0, column=0, sticky="w", pady=3
+        )
+        self.operator_var = tk.StringVar(value=NUMBER_OPERATOR_CODES["increase"])
         self.operator_combo = ttk.Combobox(
             self.number_options_frame,
             textvariable=self.operator_var,
             state="readonly",
-            values=("eq", "ne", "gt", "ge", "lt", "le", "between", "changed", "increase", "decrease"),
+            values=tuple(NUMBER_OPERATOR_LABELS.keys()),
         )
         self.operator_combo.grid(row=0, column=1, sticky="ew", pady=3)
+        self.operator_combo.bind(
+            "<<ComboboxSelected>>", self._on_number_operator_changed
+        )
 
-        ttk.Label(self.number_options_frame, text="値 / 範囲").grid(row=1, column=0, sticky="w", pady=3)
-        value_frame = ttk.Frame(self.number_options_frame)
-        value_frame.grid(row=1, column=1, sticky="ew", pady=3)
-        self.value_var = tk.StringVar(value="0")
-        self.minimum_var = tk.StringVar(value="0")
-        self.maximum_var = tk.StringVar(value="100")
-        ttk.Entry(value_frame, textvariable=self.value_var, width=12).pack(side="left")
-        ttk.Label(value_frame, text="  最小").pack(side="left")
-        ttk.Entry(value_frame, textvariable=self.minimum_var, width=10).pack(side="left")
-        ttk.Label(value_frame, text="  最大").pack(side="left")
-        ttk.Entry(value_frame, textvariable=self.maximum_var, width=10).pack(side="left")
+        self.condition_input_frame = ttk.Frame(self.number_options_frame)
+        self.condition_input_frame.grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=3
+        )
+        self.condition_input_frame.columnconfigure(1, weight=1)
+        self.condition_input_label = ttk.Label(
+            self.condition_input_frame, text="判定値"
+        )
+        self.condition_input_label.grid(row=0, column=0, sticky="w")
+        self.condition_input_var = tk.StringVar(value="0")
+        self.condition_input_entry = ttk.Entry(
+            self.condition_input_frame, textvariable=self.condition_input_var
+        )
+        self.condition_input_entry.grid(
+            row=0, column=1, sticky="ew", padx=(12, 0)
+        )
+
+        self.condition_help_var = tk.StringVar()
+        ttk.Label(
+            self.number_options_frame,
+            textvariable=self.condition_help_var,
+            wraplength=620,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(3, 0))
 
         self.image_options_frame = ttk.Frame(self.options_frame)
         self.image_options_frame.grid(row=0, column=0, sticky="ew")
@@ -616,6 +828,72 @@ class SetupApp:
         bottom.pack(fill="x")
         ttk.Button(bottom, text="config.jsonへ保存", command=self._save_all).pack(side="right")
         ttk.Button(bottom, text="閉じる", command=self.root.destroy).pack(side="right", padx=8)
+        self._update_number_condition_ui()
+
+    def _number_operator_code(self) -> str:
+        selected = self.operator_var.get()
+        if selected in NUMBER_OPERATOR_LABELS:
+            return NUMBER_OPERATOR_LABELS[selected]
+        if selected in NUMBER_OPERATOR_CODES:
+            return selected
+        return "increase"
+
+    def _set_number_operator(self, operator: str) -> None:
+        self.operator_var.set(
+            NUMBER_OPERATOR_CODES.get(operator, NUMBER_OPERATOR_CODES["increase"])
+        )
+        self._update_number_condition_ui()
+
+    def _on_number_operator_changed(
+        self, _event: tk.Event | None = None
+    ) -> None:
+        self._update_number_condition_ui()
+
+    def _update_number_condition_ui(self) -> None:
+        operator = self._number_operator_code()
+        if operator in VALUE_OPERATORS:
+            self.condition_input_frame.grid()
+            self.condition_input_label.configure(text="判定値")
+            try:
+                float(self.condition_input_var.get())
+            except ValueError:
+                self.condition_input_var.set("0")
+            self.condition_help_var.set(
+                "例: 10。OCRで読み取った数値を、この値と比較します。"
+            )
+            return
+
+        if operator == "between":
+            self.condition_input_frame.grid()
+            self.condition_input_label.configure(text="範囲")
+            try:
+                parse_range_input(self.condition_input_var.get())
+            except ValueError:
+                self.condition_input_var.set("1-10")
+            self.condition_help_var.set(
+                "範囲は 1-10 のように入力します。読み取った数値が範囲内なら検知します。"
+            )
+            return
+
+        if operator == "contains_range":
+            self.condition_input_frame.grid()
+            self.condition_input_label.configure(text="含まれる範囲")
+            try:
+                parse_range_input(self.condition_input_var.get())
+            except ValueError:
+                self.condition_input_var.set("120-129")
+            self.condition_help_var.set(
+                "OCR結果に含まれるすべての数値を確認します。例: 121.1 は 120-129 で検知します。"
+            )
+            return
+
+        self.condition_input_frame.grid_remove()
+        descriptions = {
+            "changed": "安定して読み取った数値が前回から変わったときに検知します。",
+            "increase": "安定して読み取った数値が前回より増えたときに検知します。",
+            "decrease": "安定して読み取った数値が前回より減ったときに検知します。",
+        }
+        self.condition_help_var.set(descriptions.get(operator, ""))
 
     def _resolve_template_path(self, value: Any) -> Path | None:
         if not isinstance(value, str) or not value.strip():
@@ -629,7 +907,7 @@ class SetupApp:
         path = self._resolve_template_path(rule.get("template"))
         if path is None or path.suffix.lower() not in IMAGE_EXTENSIONS or not path.is_file():
             return False
-        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        image = read_cv_image(path, cv2.IMREAD_GRAYSCALE)
         return image is not None and image.size > 0
 
     def _refresh_rule_list(self) -> None:
@@ -678,10 +956,19 @@ class SetupApp:
             if isinstance(rule.get("condition"), dict)
             else {}
         )
-        self.operator_var.set(str(condition.get("operator", "increase")))
-        self.value_var.set(str(condition.get("value", 0)))
-        self.minimum_var.set(str(condition.get("minimum", 0)))
-        self.maximum_var.set(str(condition.get("maximum", 100)))
+        operator = str(condition.get("operator", "increase"))
+        if operator in VALUE_OPERATORS:
+            self.condition_input_var.set(format_number(condition.get("value", 0)))
+        elif operator in RANGE_OPERATORS:
+            self.condition_input_var.set(
+                format_range(
+                    condition.get("minimum", 0),
+                    condition.get("maximum", 100),
+                )
+            )
+        else:
+            self.condition_input_var.set("")
+        self._set_number_operator(operator)
         self.threshold_var.set(str(rule.get("match_threshold", 0.90)))
         self.required_var.set(str(rule.get("required_matches", 2)))
         self.sound_var.set(bool(rule.get("sound_enabled", False)))
@@ -769,6 +1056,7 @@ class SetupApp:
         *,
         show_error: bool,
     ) -> bool:
+        """Require an image-rule region to match the template dimensions exactly."""
         if self.region_value is None:
             return True
         dimensions = self._template_dimensions(rule)
@@ -777,17 +1065,20 @@ class SetupApp:
         template_width, template_height = dimensions
         region_width = int(self.region_value["width"])
         region_height = int(self.region_value["height"])
-        fits = template_width <= region_width and template_height <= region_height
-        if not fits and show_error:
+        matches = (
+            template_width == region_width
+            and template_height == region_height
+        )
+        if not matches and show_error:
             messagebox.showerror(
-                "画像と監視範囲が一致しません",
-                "登録画像が監視範囲より大きいため、画像一致判定ができません。\n\n"
+                "画像と監視範囲のサイズが一致しません",
+                "画像一致ルールの監視範囲は、登録画像と同じサイズにしてください。\n\n"
                 f"監視範囲: {region_width} x {region_height}\n"
                 f"登録画像: {template_width} x {template_height}\n\n"
-                "監視範囲を広げるか、登録画像を小さくしてください。",
+                "「画面から範囲選択」を押すと、登録画像と同じサイズの枠で位置を指定できます。",
                 parent=self.root,
             )
-        return fits
+        return matches
 
     def _add_rule(self, detector: str) -> None:
         name = simpledialog.askstring(
@@ -883,8 +1174,44 @@ class SetupApp:
             )
             return
 
+        rule = self.config["rules"][self.selected_rule_index]
         monitor_index = max(0, self.monitor_combo.current())
         monitor = self.monitors[monitor_index]
+        selector_options: dict[str, int] = {}
+
+        if rule.get("detector") == "template":
+            if not self._ensure_template_registered(rule, prompt=True):
+                self.result_var.set(
+                    "画像一致ルールでは、先にPNG/JPEG画像を登録してください。"
+                )
+                return
+            dimensions = self._template_dimensions(rule)
+            if dimensions is None:
+                messagebox.showerror(
+                    "監視範囲",
+                    "登録画像のサイズを取得できません。画像を再登録してください。",
+                    parent=self.root,
+                )
+                return
+            template_width, template_height = dimensions
+            if (
+                template_width > int(monitor["width"])
+                or template_height > int(monitor["height"])
+            ):
+                messagebox.showerror(
+                    "監視範囲",
+                    "登録画像が選択対象モニターより大きいため、範囲を指定できません。\n\n"
+                    f"モニター: {monitor['width']} x {monitor['height']}\n"
+                    f"登録画像: {template_width} x {template_height}\n\n"
+                    "別のモニターを選択するか、登録画像を変更してください。",
+                    parent=self.root,
+                )
+                return
+            selector_options = {
+                "fixed_width": template_width,
+                "fixed_height": template_height,
+            }
+
         result_path = Path(tempfile.gettempdir()) / (
             f"screen_image_monitor_region_{uuid.uuid4().hex}.json"
         )
@@ -901,6 +1228,7 @@ class SetupApp:
                 "--region-selector-helper",
                 json.dumps(monitor, ensure_ascii=False),
                 str(result_path),
+                json.dumps(selector_options, ensure_ascii=False),
             ]
         )
 
@@ -986,14 +1314,22 @@ class SetupApp:
             return
 
         self.region_value = region
+        rule["region"] = dict(region)
         self._update_region_text()
         image = capture_region(region)
         self._show_region_preview(image)
-        rule = self._current_rule()
-        if rule is not None and rule.get("detector") == "template":
+        if rule.get("detector") == "template":
             if not self._validate_template_fits_region(rule, show_error=True):
-                self.result_var.set("登録画像より広い監視範囲を選択してください。")
+                self.region_value = None
+                rule["region"] = None
+                self._update_region_text()
+                self._clear_region_preview()
                 return
+            self.result_var.set(
+                f"登録画像と同じ {region['width']} x {region['height']} の監視位置を指定しました。"
+                "ルールへ反映後、config.jsonへ保存してください。"
+            )
+            return
         self.result_var.set(
             f"監視範囲を選択しました: {region['width']} x {region['height']}。"
             "ルールへ反映後、config.jsonへ保存してください。"
@@ -1043,7 +1379,11 @@ class SetupApp:
             return None
         return self.config["rules"][self.selected_rule_index]
 
-    def _register_template_file(self) -> bool:
+    def _register_template_file(
+        self,
+        *,
+        select_region_after: bool = True,
+    ) -> bool:
         rule = self._current_rule()
         if rule is None or rule.get("detector") != "template":
             messagebox.showinfo(
@@ -1086,20 +1426,6 @@ class SetupApp:
             )
             return False
 
-        if self.region_value is not None:
-            region_width = int(self.region_value["width"])
-            region_height = int(self.region_value["height"])
-            if image.width > region_width or image.height > region_height:
-                messagebox.showerror(
-                    "画像と監視範囲が一致しません",
-                    "登録画像が現在の監視範囲より大きいため登録できません。\n\n"
-                    f"監視範囲: {region_width} x {region_height}\n"
-                    f"登録画像: {image.width} x {image.height}\n\n"
-                    "監視範囲を広げてから再登録してください。",
-                    parent=self.root,
-                )
-                return False
-
         destination_dir = APP_DIR / "templates"
         destination_dir.mkdir(parents=True, exist_ok=True)
         rule_name = safe_filename(self.name_var.get() or str(rule.get("name", "rule")))
@@ -1126,10 +1452,40 @@ class SetupApp:
         rule["template"] = relative
         self.template_var.set(relative)
         self._show_template_preview(image)
-        self.result_var.set(f"照合画像を登録しました: {relative}")
+
+        region_matches = (
+            self.region_value is not None
+            and int(self.region_value["width"]) == image.width
+            and int(self.region_value["height"]) == image.height
+        )
+        if not region_matches:
+            self.region_value = None
+            rule["region"] = None
+            self._update_region_text()
+            self._clear_region_preview(
+                f"登録画像と同じ {image.width} x {image.height} の監視位置を指定してください。"
+            )
+
         self._refresh_rule_list()
         if self.selected_rule_index is not None:
             self.rule_list.selection_set(self.selected_rule_index)
+
+        if not region_matches and select_region_after:
+            self.result_var.set(
+                f"照合画像を登録しました: {relative}\n"
+                f"続けて、登録画像と同じ {image.width} x {image.height} の監視位置を指定します。"
+            )
+            self.root.after(150, self._select_region)
+        elif region_matches:
+            self.result_var.set(
+                f"照合画像を登録しました: {relative}\n"
+                f"既存の監視範囲は画像と同じ {image.width} x {image.height} です。"
+            )
+        else:
+            self.result_var.set(
+                f"照合画像を登録しました: {relative}\n"
+                "「画面から範囲選択」で画像と同じサイズの監視位置を指定してください。"
+            )
         return True
 
     def _ensure_template_registered(
@@ -1150,7 +1506,7 @@ class SetupApp:
         )
         if not register:
             return False
-        return self._register_template_file()
+        return self._register_template_file(select_region_after=False)
 
     def _apply_fields(self, show_message: bool = True) -> bool:
         rule = self._current_rule()
@@ -1197,20 +1553,32 @@ class SetupApp:
 
         if rule.get("detector") == "number":
             condition = rule.setdefault("condition", {})
-            operator = self.operator_var.get()
+            operator = self._number_operator_code()
             condition["operator"] = operator
             condition.setdefault("tolerance", 0)
             condition.setdefault("trigger_on_initial", False)
             try:
-                if operator == "between":
-                    condition["minimum"] = float(self.minimum_var.get())
-                    condition["maximum"] = float(self.maximum_var.get())
-                elif operator in {"eq", "ne", "gt", "ge", "lt", "le"}:
-                    condition["value"] = float(self.value_var.get())
-            except ValueError:
+                if operator in RANGE_OPERATORS:
+                    minimum, maximum = parse_range_input(
+                        self.condition_input_var.get()
+                    )
+                    condition["minimum"] = minimum
+                    condition["maximum"] = maximum
+                    condition.pop("value", None)
+                elif operator in VALUE_OPERATORS:
+                    condition["value"] = float(self.condition_input_var.get())
+                    condition.pop("minimum", None)
+                    condition.pop("maximum", None)
+                else:
+                    condition.pop("value", None)
+                    condition.pop("minimum", None)
+                    condition.pop("maximum", None)
+            except ValueError as error:
                 messagebox.showerror(
                     "設定",
-                    "数値条件に正しい数字を入力してください。",
+                    str(error)
+                    if str(error)
+                    else "数値条件に正しい数字を入力してください。",
                     parent=self.root,
                 )
                 return False
@@ -1331,14 +1699,29 @@ class SetupApp:
                     f"-c tessedit_char_whitelist={whitelist}"
                 ),
             ).strip()
-            self.result_var.set(f"OCR結果: {text!r}")
+            numbers = parse_ocr_numbers(text)
+            condition = rule.get("condition", {})
+            number_index = int(options.get("number_index", 0))
+            matched, matched_number = test_ocr_condition(
+                text, condition, number_index
+            )
+            number_text = ", ".join(f"{value:g}" for value in numbers) or "なし"
+            if matched is None:
+                judgement = "変化条件は監視開始後に前回値と比較して判定します。"
+            elif matched:
+                judgement = f"条件に一致しました（該当値: {matched_number:g}）。"
+            else:
+                judgement = "条件には一致しませんでした。"
+            self.result_var.set(
+                f"OCR結果: {text!r} / 読み取った数値: {number_text} / {judgement}"
+            )
             return
 
         template_path = self._resolve_template_path(rule.get("template"))
         if template_path is None or not template_path.is_file():
             self.result_var.set("PNG/JPEG画像を登録してください。")
             return
-        template = cv2.imread(str(template_path), cv2.IMREAD_GRAYSCALE)
+        template = read_cv_image(template_path, cv2.IMREAD_GRAYSCALE)
         current = cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
         if template is None:
             self.result_var.set(f"登録画像を読み込めません: {template_path}")

@@ -17,6 +17,8 @@ import mss
 import numpy as np
 import pytesseract
 
+from image_file_io import read_cv_image, write_cv_image
+
 
 ActionType = Literal["count"]
 DetectorType = Literal["template", "number"]
@@ -28,6 +30,7 @@ NumberOperator = Literal[
     "lt",
     "le",
     "between",
+    "contains_range",
     "changed",
     "increase",
     "decrease",
@@ -54,6 +57,7 @@ APP_DIR = application_directory()
 RESOURCE_DIR = resource_directory()
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "monitor.log"
+
 
 
 @dataclass(frozen=True)
@@ -252,6 +256,7 @@ def parse_number_condition(data: Any, rule_name: str) -> NumberCondition:
         "lt",
         "le",
         "between",
+        "contains_range",
         "changed",
         "increase",
         "decrease",
@@ -281,12 +286,12 @@ def parse_number_condition(data: Any, rule_name: str) -> NumberCondition:
                 f"Rule '{rule_name}': condition.value is required for '{operator}'."
             )
 
-    if operator == "between":
+    if operator in {"between", "contains_range"}:
         minimum = optional_number(data, "minimum")
         maximum = optional_number(data, "maximum")
         if minimum is None or maximum is None:
             raise ValueError(
-                f"Rule '{rule_name}': minimum and maximum are required for between."
+                f"Rule '{rule_name}': minimum and maximum are required for '{operator}'."
             )
         if minimum > maximum:
             raise ValueError(
@@ -418,7 +423,7 @@ def load_config() -> AppConfig:
             raise ValueError(f"Rule name is duplicated: {name}")
         seen_names.add(name)
 
-        # v6.2 integrates sound notification into every count rule.
+        # v6.3 integrates sound notification into every count rule.
         # Legacy action="sound" rules are migrated to count + sound_enabled.
         legacy_action = item.get("action", "count")
         if legacy_action not in ("sound", "count"):
@@ -672,7 +677,7 @@ def load_template(rule: Rule) -> np.ndarray:
             f"Rule '{rule.name}': template image not found: {rule.template_path}"
         )
 
-    template = cv2.imread(str(rule.template_path), cv2.IMREAD_GRAYSCALE)
+    template = read_cv_image(rule.template_path, cv2.IMREAD_GRAYSCALE)
     if template is None or template.size == 0:
         raise ValueError(
             f"Rule '{rule.name}': template image could not be read: "
@@ -857,7 +862,7 @@ def threshold_condition_matches(value: float, condition: NumberCondition) -> boo
     if condition.operator == "le":
         assert condition.value is not None
         return value <= condition.value + tolerance
-    if condition.operator == "between":
+    if condition.operator in {"between", "contains_range"}:
         assert condition.minimum is not None and condition.maximum is not None
         return (
             value >= condition.minimum - tolerance
@@ -865,6 +870,32 @@ def threshold_condition_matches(value: float, condition: NumberCondition) -> boo
         )
     raise ValueError(
         f"Operator '{condition.operator}' is not a threshold condition."
+    )
+
+
+def matching_number_for_condition(
+    primary_number: float | None,
+    ocr_text: str,
+    condition: NumberCondition,
+) -> float | None:
+    """Return the OCR number that satisfies the configured condition.
+
+    Normal numeric conditions evaluate the configured number_index value.
+    ``contains_range`` searches every number present in the OCR text so that,
+    for example, OCR text ``121.1`` matches the configured range ``120-129``.
+    """
+    if condition.operator == "contains_range":
+        for candidate in parse_numbers(ocr_text):
+            if threshold_condition_matches(candidate, condition):
+                return candidate
+        return None
+
+    if primary_number is None:
+        return None
+    return (
+        primary_number
+        if threshold_condition_matches(primary_number, condition)
+        else None
     )
 
 
@@ -914,7 +945,7 @@ def save_evidence_image(
     else:
         output = image
 
-    if not cv2.imwrite(str(path), output):
+    if not write_cv_image(path, output):
         log(f"[{rule.name}] Could not save evidence screenshot: {path}")
         return None
     log(f"[{rule.name}] Evidence screenshot saved: {path}")
@@ -1056,7 +1087,8 @@ def evaluate_number_rule(
             execute_action(rule, state, config, states, current, evidence_image)
         return
 
-    matches = number is not None and threshold_condition_matches(number, condition)
+    matched_number = matching_number_for_condition(number, ocr_text, condition)
+    matches = matched_number is not None
 
     if not state.target_is_present:
         if matches:
@@ -1067,9 +1099,11 @@ def evaluate_number_rule(
         if state.consecutive_matches >= rule.required_matches:
             state.target_is_present = True
             state.consecutive_matches = 0
-            assert number is not None
-            log(f"[{rule.name}] Numeric condition matched: {number:g}")
-            execute_action(rule, state, config, states, number, evidence_image)
+            assert matched_number is not None
+            log(f"[{rule.name}] Numeric condition matched: {matched_number:g}")
+            execute_action(
+                rule, state, config, states, matched_number, evidence_image
+            )
         return
 
     if not matches:

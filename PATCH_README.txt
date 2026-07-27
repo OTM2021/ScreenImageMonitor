@@ -1,13 +1,18 @@
-ScreenImageMonitor v6.3 範囲選択修正パッチ
+ScreenImageMonitor v6.6 修正パッチ
 
-このZIPを展開し、GitHubリポジトリ直下へ上書きアップロードしてください。
-config.jsonとcounts.jsonは含めていないため、既存設定とカウントは維持されます。
+変更内容:
+- 数値条件を日本語表示へ変更
+- 「値 / 範囲」を条件別の1入力欄へ変更
+- 範囲を 1-10 の形式で入力可能
+- 「OCR結果に指定範囲の数値を含む」を追加
+- OCR結果 121.1 を範囲 120-129 で検知可能
+- 数字OCRテストで、読み取った数値と条件一致結果を表示
 
-主な変更:
-- 「画面から範囲選択」へ名称統一
-- 範囲選択画面を独立プロセスで起動
-- 設定画面のmodal/grab状態に依存しない表示方式
-- GitHub Actionsに範囲選択ヘルパー検査を追加
+適用方法:
+1. このZIPを展開します。
+2. 中身をGitHubリポジトリ直下へ上書きアップロードします。
+3. Commit changesを押します。
+4. ActionsからBuild Windows Integrated GUI EXEを実行します。
+5. Artifact「ScreenImageMonitor-Windows-GUI-v6.6」を取得します。
 
-再ビルド後のArtifact:
-ScreenImageMonitor-Windows-GUI-v6.3
+config.jsonとcounts.jsonはパッチに含まれていないため、既存設定とカウントは維持されます。
