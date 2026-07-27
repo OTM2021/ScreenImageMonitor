@@ -1,98 +1,12 @@
-# ScreenImageMonitor 統合GUI版 v5
+# v5.1 GitHub Actions build fix
 
-Windows画面の指定範囲を監視し、数字OCRまたは登録画像との一致でカウントアップ／音通知を行うGUIアプリです。操作は `ScreenImageMonitor.exe` だけで完結し、BATファイルは使用しません。
+GitHub Actions の `Verify source and imports` で、日本語文字列を `python -c` に直接渡して文字化けする問題を修正します。
 
-## v5の主な変更
+上書き対象:
 
-- 数字OCRルールと画像一致ルールの設定画面を完全に分離
-- 画像ルール選択時は数値条件・OCR項目を非表示
-- 画像ルールのテストボタンを「画像一致テスト」と明示
-- 監視一覧の「OCR生データ」を「判定詳細」へ変更
-- 画像ルールの判定詳細には登録PNG/JPEG名を表示し、OCRを実行しないことを明確化
+- `.github/workflows/build-windows.yml`
+- `ui_separation_smoke_test.py`
 
-- カウンターをメイン画面から分離し、専用ポップアップで表示
-- メイン画面の「カウンター表示」から再表示可能
-- カウンターポップアップで個別クリア／全クリアが可能
-- 監視一覧の文字サイズと行高を同じフォント基準で調整
-- メイン画面でルールを選び「選択ルールの監視範囲を指定」を押すと、GUIのドラッグ選択を直接開始
-- 画像識別はPNG／JPG／JPEGの事前登録を必須化
-- 画像未登録時は、ルール作成時・保存時・監視開始時に登録を案内
-- 現在画面のキャプチャはプレビュー確認用であり、照合画像には自動登録しない
-- Tesseract OCRと英語学習データを単一EXEへ内包
+修正後の Artifact 名:
 
-## 基本操作
-
-1. `ScreenImageMonitor.exe`を起動します。
-2. メイン画面の「設定」を開き、ルールを追加します。
-3. 対象モニターを選び、「画面からドラッグ選択」で監視範囲を指定します。
-4. 数字OCRルールはOCR条件を設定します。
-5. 画像識別ルールは「PNG/JPEGを登録...」から照合画像を登録します。
-6. 「ルールへ反映」後、「config.jsonへ保存」を押します。
-7. メイン画面で「監視開始」を押します。
-
-## 監視範囲をメイン画面から指定
-
-メイン画面の監視一覧から対象ルールを選び、次を押します。
-
-```text
-選択ルールの監視範囲を指定
-```
-
-監視中の場合は自動停止後、設定画面とドラッグ選択画面が開きます。
-
-## 判定方式の違い
-
-- **数字OCR**: 監視範囲をTesseractで読み取り、数値条件で判定します。
-- **画像一致**: 登録したPNG/JPEGと監視範囲をOpenCVで比較し、一致率で判定します。Tesseract OCRは実行しません。
-
-## 画像識別ルール
-
-照合画像は次の形式に対応します。
-
-```text
-.png
-.jpg
-.jpeg
-```
-
-登録した画像はアプリと同じ場所の `templates` フォルダーへコピーされます。登録元ファイルを移動または削除しても、コピー済み画像を使用します。
-
-画像が未登録・削除済み・未対応形式の場合、設定保存または監視開始を続行せず、登録を促します。
-
-## カウンターポップアップ
-
-EXE起動時にカウンター専用ウィンドウが開きます。閉じた場合は、メイン画面の「カウンター表示」で再表示できます。
-
-カウント値は `counts.json` に保存され、アプリを終了しても維持されます。
-
-## GitHub ActionsでEXEを作る
-
-GitHubリポジトリ直下へファイル一式を登録し、次を実行します。
-
-```text
-Actions
-→ Build Windows Integrated GUI EXE
-→ Run workflow
-```
-
-成功後、実行結果画面のArtifactsから次を取得します。
-
-```text
-ScreenImageMonitor-Windows-GUI-v5
-```
-
-Artifactを展開し、`ScreenImageMonitor.exe`を起動してください。
-
-## 配布構成
-
-```text
-ScreenImageMonitor.exe
-config.json
-README.md
-templates/
-samples/
-sounds/
-evidence/
-```
-
-TesseractはEXE内部へ同梱されるため、外部の`tesseract`フォルダーは不要です。
+- `ScreenImageMonitor-Windows-GUI-v5.1`
