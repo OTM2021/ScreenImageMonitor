@@ -72,10 +72,15 @@ jobs:
           python -m py_compile `
             screen_image_monitor.py `
             screen_setup_gui.py `
-            screen_image_monitor_gui.py
+            screen_image_monitor_gui.py `
+            configuration_smoke_test.py
 
           python -c "import tkinter; from PIL import Image, ImageTk; import cv2, mss, numpy, pytesseract, PyInstaller; print('Import check OK')"
           python -c "import screen_image_monitor as app; c=app.load_config(); print('rules=', len(c.rules), 'mode=', c.coordinate_mode)"
+
+      - name: Run configuration smoke test
+        shell: powershell
+        run: python configuration_smoke_test.py
 
       - name: Run OCR smoke test
         shell: powershell
@@ -156,7 +161,7 @@ jobs:
       - name: Upload Windows package
         uses: actions/upload-artifact@v6
         with:
-          name: ScreenImageMonitor-Windows-GUI-v3
+          name: ScreenImageMonitor-Windows-GUI-v4
           path: package
           if-no-files-found: error
           retention-days: 14
