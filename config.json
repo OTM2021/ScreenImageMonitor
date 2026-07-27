@@ -35,6 +35,24 @@
         "number_index": 0,
         "border": 10
       }
+    },
+    {
+      "name": "c",
+      "detector": "template",
+      "action": "count",
+      "sound_enabled": false,
+      "sound": "sounds/alert.wav",
+      "region": {
+        "left": 0,
+        "top": 0,
+        "width": 725,
+        "height": 497
+      },
+      "required_matches": 2,
+      "save_evidence": true,
+      "template": "templates/c_2026-07-27_181853.png",
+      "match_threshold": 0.85,
+      "release_threshold": 0.75
     }
   ]
 }
