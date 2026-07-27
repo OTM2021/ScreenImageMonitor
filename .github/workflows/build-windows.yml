@@ -80,7 +80,8 @@ jobs:
             region_selector_smoke_test.py `
             image_file_io.py `
             unicode_image_io_smoke_test.py `
-            number_condition_smoke_test.py
+            number_condition_smoke_test.py `
+            counter_font_smoke_test.py
 
           python -c "import tkinter; from PIL import Image, ImageTk; import cv2, mss, numpy, pytesseract, PyInstaller; print('Import check OK')"
           python -c "import screen_image_monitor as app; c=app.load_config(); print('rules=', len(c.rules), 'mode=', c.coordinate_mode)"
@@ -90,6 +91,7 @@ jobs:
           python region_selector_smoke_test.py
           python unicode_image_io_smoke_test.py
           python number_condition_smoke_test.py
+          python counter_font_smoke_test.py
 
       - name: Run configuration smoke test
         shell: powershell
@@ -162,6 +164,7 @@ jobs:
           Copy-Item "dist\ScreenImageMonitor.exe" "$package\"
           Copy-Item "config.json" "$package\"
           Copy-Item "README.md" "$package\"
+          Copy-Item "counter_display.json" "$package\"
 
           foreach ($directory in @("templates", "sounds", "samples", "evidence")) {
             if (Test-Path $directory) {
@@ -174,7 +177,7 @@ jobs:
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: ScreenImageMonitor-Windows-GUI-v6.6.1
+          name: ScreenImageMonitor-Windows-GUI-v1.0
           path: package
           if-no-files-found: error
           retention-days: 14
