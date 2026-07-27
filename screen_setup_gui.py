@@ -5,7 +5,6 @@ import os
 import re
 import shutil
 import sys
-import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,7 +13,7 @@ import mss
 import numpy as np
 import pytesseract
 import tkinter as tk
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 
@@ -130,58 +129,91 @@ def capture_region(region: dict[str, int]) -> Image.Image:
 
 
 class RegionSelector:
+    """Select an exact desktop region on a 1:1 monitor overlay.
+
+    The previous selector resized a screenshot to fit a normal window and then
+    converted the scaled drag coordinates back to desktop coordinates.  That
+    approach can drift on mixed-DPI or multi-monitor Windows environments.
+    This selector places a borderless screenshot overlay directly on the
+    selected monitor, so one canvas pixel always equals one desktop pixel.
+    """
+
     def __init__(self, parent: tk.Misc, monitor: dict[str, int]) -> None:
         self.result: dict[str, int] | None = None
-        self.monitor = monitor
-        self.original = capture_region(monitor)
+        self.monitor = {key: int(value) for key, value in monitor.items()}
+        self.original = capture_region(self.monitor)
 
         self.window = tk.Toplevel(parent)
-        self.window.title("領域選択")
-        self.window.grab_set()
+        self.window.withdraw()
+        self.window.title("監視範囲を選択")
+        self.window.overrideredirect(True)
+        self.window.attributes("-topmost", True)
 
-        screen_w = max(900, parent.winfo_screenwidth() - 120)
-        screen_h = max(600, parent.winfo_screenheight() - 180)
-        scale = min(screen_w / self.original.width, screen_h / self.original.height, 1.0)
-        self.scale = scale
-        shown_size = (
-            max(1, int(self.original.width * scale)),
-            max(1, int(self.original.height * scale)),
-        )
-        shown = self.original.resize(shown_size, Image.Resampling.LANCZOS)
-        self.photo = ImageTk.PhotoImage(shown)
+        width = self.monitor["width"]
+        height = self.monitor["height"]
+        left = self.monitor["left"]
+        top = self.monitor["top"]
+        self.window.geometry(f"{width}x{height}{left:+d}{top:+d}")
 
-        ttk.Label(
-            self.window,
-            text="マウスで対象範囲をドラッグしてください。Enterで確定、Escで取消します。",
-        ).pack(fill="x", padx=8, pady=8)
-
+        self.photo = ImageTk.PhotoImage(self.original)
         self.canvas = tk.Canvas(
             self.window,
-            width=shown_size[0],
-            height=shown_size[1],
+            width=width,
+            height=height,
             cursor="crosshair",
             highlightthickness=0,
+            borderwidth=0,
         )
-        self.canvas.pack(padx=8, pady=(0, 8))
+        self.canvas.pack(fill="both", expand=True)
         self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+        self.canvas.create_rectangle(
+            16,
+            16,
+            min(width - 16, 660),
+            68,
+            fill="#101010",
+            outline="#ffffff",
+            width=1,
+            stipple="gray50",
+        )
+        self.canvas.create_text(
+            30,
+            42,
+            anchor="w",
+            fill="#ffffff",
+            font=("Yu Gothic UI", 14, "bold"),
+            text="監視する範囲をドラッグしてください。マウスを離すと確定します。Esc／右クリックで取消。",
+        )
 
         self.start_x = 0
         self.start_y = 0
         self.end_x = 0
         self.end_y = 0
         self.rect_id: int | None = None
+        self.confirm_pending = False
 
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._drag)
         self.canvas.bind("<ButtonRelease-1>", self._release)
-        self.window.bind("<Return>", lambda _event: self._confirm())
+        self.canvas.bind("<Button-3>", lambda _event: self._cancel())
         self.window.bind("<Escape>", lambda _event: self._cancel())
         self.window.protocol("WM_DELETE_WINDOW", self._cancel)
+
+        self.window.deiconify()
+        self.window.lift()
         self.window.focus_force()
+        self.window.grab_set()
+
+    def _clamp_x(self, value: int) -> int:
+        return max(0, min(value, self.monitor["width"] - 1))
+
+    def _clamp_y(self, value: int) -> int:
+        return max(0, min(value, self.monitor["height"] - 1))
 
     def _press(self, event: tk.Event) -> None:
-        self.start_x = max(0, min(int(event.x), self.photo.width()))
-        self.start_y = max(0, min(int(event.y), self.photo.height()))
+        self.confirm_pending = False
+        self.start_x = self._clamp_x(int(event.x))
+        self.start_y = self._clamp_y(int(event.y))
         self.end_x = self.start_x
         self.end_y = self.start_y
         if self.rect_id is not None:
@@ -191,13 +223,13 @@ class RegionSelector:
             self.start_y,
             self.end_x,
             self.end_y,
-            outline="#ff3030",
-            width=3,
+            outline="#ff2020",
+            width=4,
         )
 
     def _drag(self, event: tk.Event) -> None:
-        self.end_x = max(0, min(int(event.x), self.photo.width()))
-        self.end_y = max(0, min(int(event.y), self.photo.height()))
+        self.end_x = self._clamp_x(int(event.x))
+        self.end_y = self._clamp_y(int(event.y))
         if self.rect_id is not None:
             self.canvas.coords(
                 self.rect_id,
@@ -209,28 +241,33 @@ class RegionSelector:
 
     def _release(self, event: tk.Event) -> None:
         self._drag(event)
-
-    def _confirm(self) -> None:
         x1, x2 = sorted((self.start_x, self.end_x))
         y1, y2 = sorted((self.start_y, self.end_y))
         if x2 - x1 < 3 or y2 - y1 < 3:
-            messagebox.showwarning("領域選択", "3ピクセル以上の範囲を選択してください。", parent=self.window)
+            messagebox.showwarning(
+                "監視範囲",
+                "3ピクセル以上の範囲を選択してください。",
+                parent=self.window,
+            )
             return
+        self.confirm_pending = True
+        self.window.after(60, self._confirm)
 
-        original_x1 = int(round(x1 / self.scale))
-        original_y1 = int(round(y1 / self.scale))
-        original_x2 = int(round(x2 / self.scale))
-        original_y2 = int(round(y2 / self.scale))
-
+    def _confirm(self) -> None:
+        if not self.confirm_pending:
+            return
+        x1, x2 = sorted((self.start_x, self.end_x))
+        y1, y2 = sorted((self.start_y, self.end_y))
         self.result = {
-            "left": self.monitor["left"] + original_x1,
-            "top": self.monitor["top"] + original_y1,
-            "width": max(1, original_x2 - original_x1),
-            "height": max(1, original_y2 - original_y1),
+            "left": self.monitor["left"] + x1,
+            "top": self.monitor["top"] + y1,
+            "width": max(1, x2 - x1),
+            "height": max(1, y2 - y1),
         }
         self.window.destroy()
 
     def _cancel(self) -> None:
+        self.confirm_pending = False
         self.result = None
         self.window.destroy()
 
@@ -271,7 +308,8 @@ class SetupApp:
             raise RuntimeError("モニターを取得できませんでした。")
 
         self.selected_rule_index: int | None = None
-        self.preview_photo: ImageTk.PhotoImage | None = None
+        self.region_preview_photo: ImageTk.PhotoImage | None = None
+        self.template_preview_photo: ImageTk.PhotoImage | None = None
         self.region_value: dict[str, int] | None = None
 
         self._build_ui()
@@ -425,13 +463,34 @@ class SetupApp:
         self.test_button.pack(side="left", padx=8)
         ttk.Button(action_frame, text="ルールへ反映", command=self._apply_fields).pack(side="left", padx=8)
 
-        ttk.Label(right, text="プレビュー画像／テスト結果").grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 4))
-        preview_frame = ttk.Frame(right, relief="sunken", borderwidth=1)
+        ttk.Label(right, text="監視範囲と登録画像／テスト結果").grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 4))
+        preview_frame = ttk.Frame(right)
         preview_frame.grid(row=9, column=0, columnspan=2, sticky="nsew")
         preview_frame.columnconfigure(0, weight=1)
+        preview_frame.columnconfigure(1, weight=1)
         preview_frame.rowconfigure(0, weight=1)
-        self.preview_label = ttk.Label(preview_frame, text="画面から領域を選択後、取り込みまたはテストを実行してください。", anchor="center")
-        self.preview_label.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+
+        region_preview_box = ttk.LabelFrame(preview_frame, text="監視範囲の現在画像", padding=6)
+        region_preview_box.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        region_preview_box.columnconfigure(0, weight=1)
+        region_preview_box.rowconfigure(0, weight=1)
+        self.region_preview_label = ttk.Label(
+            region_preview_box,
+            text="画面から監視範囲を選択してください。",
+            anchor="center",
+        )
+        self.region_preview_label.grid(row=0, column=0, sticky="nsew")
+
+        template_preview_box = ttk.LabelFrame(preview_frame, text="登録したPNG/JPEG", padding=6)
+        template_preview_box.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        template_preview_box.columnconfigure(0, weight=1)
+        template_preview_box.rowconfigure(0, weight=1)
+        self.template_preview_label = ttk.Label(
+            template_preview_box,
+            text="画像ルールではPNG/JPEGを登録してください。",
+            anchor="center",
+        )
+        self.template_preview_label.grid(row=0, column=0, sticky="nsew")
         self.result_var = tk.StringVar(value="")
         ttk.Label(right, textvariable=self.result_var, font=("Segoe UI", 11, "bold")).grid(row=10, column=0, columnspan=2, sticky="w", pady=6)
 
@@ -494,6 +553,14 @@ class SetupApp:
             rule.get("region") if isinstance(rule.get("region"), dict) else None
         )
         self._update_region_text()
+        self._select_monitor_for_region(self.region_value)
+        if self.region_value is not None:
+            try:
+                self._show_region_preview(capture_region(self.region_value))
+            except Exception as error:
+                self._clear_region_preview(f"監視範囲を取得できません: {error}")
+        else:
+            self._clear_region_preview()
         condition = (
             rule.get("condition", {})
             if isinstance(rule.get("condition"), dict)
@@ -523,13 +590,14 @@ class SetupApp:
                     with Image.open(path) as opened:
                         preview = opened.convert("RGB")
                         preview.load()
-                    self._show_preview(preview)
+                    self._show_template_preview(preview)
                 except OSError:
-                    self.preview_label.configure(image="", text="登録画像を読み込めません。再登録してください。")
+                    self._clear_template_preview("登録画像を読み込めません。再登録してください。")
         else:
             self.template_label.grid_remove()
             self.template_frame.grid_remove()
             self.template_var.set("対象外")
+            self._clear_template_preview("数字OCRルールでは登録画像を使用しません。")
             self.image_options_frame.grid_remove()
             self.number_options_frame.grid()
             self.options_frame.configure(text="数字OCR判定条件")
@@ -544,6 +612,69 @@ class SetupApp:
             f"left={r['left']}, top={r['top']}, "
             f"width={r['width']}, height={r['height']}"
         )
+
+    def _select_monitor_for_region(self, region: dict[str, int] | None) -> None:
+        if not region:
+            return
+        center_x = int(region.get("left", 0)) + int(region.get("width", 1)) // 2
+        center_y = int(region.get("top", 0)) + int(region.get("height", 1)) // 2
+
+        best_index = 0
+        best_overlap = -1
+        for index, monitor in enumerate(self.monitors):
+            left = int(monitor["left"])
+            top = int(monitor["top"])
+            right = left + int(monitor["width"])
+            bottom = top + int(monitor["height"])
+            if left <= center_x < right and top <= center_y < bottom:
+                self.monitor_combo.current(index)
+                return
+
+            overlap_left = max(left, int(region.get("left", 0)))
+            overlap_top = max(top, int(region.get("top", 0)))
+            overlap_right = min(right, int(region.get("left", 0)) + int(region.get("width", 1)))
+            overlap_bottom = min(bottom, int(region.get("top", 0)) + int(region.get("height", 1)))
+            overlap = max(0, overlap_right - overlap_left) * max(0, overlap_bottom - overlap_top)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_index = index
+        self.monitor_combo.current(best_index)
+
+    def _template_dimensions(self, rule: dict[str, Any]) -> tuple[int, int] | None:
+        path = self._resolve_template_path(rule.get("template"))
+        if path is None or not path.is_file():
+            return None
+        try:
+            with Image.open(path) as opened:
+                return opened.width, opened.height
+        except OSError:
+            return None
+
+    def _validate_template_fits_region(
+        self,
+        rule: dict[str, Any],
+        *,
+        show_error: bool,
+    ) -> bool:
+        if self.region_value is None:
+            return True
+        dimensions = self._template_dimensions(rule)
+        if dimensions is None:
+            return True
+        template_width, template_height = dimensions
+        region_width = int(self.region_value["width"])
+        region_height = int(self.region_value["height"])
+        fits = template_width <= region_width and template_height <= region_height
+        if not fits and show_error:
+            messagebox.showerror(
+                "画像と監視範囲が一致しません",
+                "登録画像が監視範囲より大きいため、画像一致判定ができません。\n\n"
+                f"監視範囲: {region_width} x {region_height}\n"
+                f"登録画像: {template_width} x {template_height}\n\n"
+                "監視範囲を広げるか、登録画像を小さくしてください。",
+                parent=self.root,
+            )
+        return fits
 
     def _add_rule(self, detector: str, action: str) -> None:
         name = simpledialog.askstring(
@@ -641,7 +772,6 @@ class SetupApp:
         monitor_index = max(0, self.monitor_combo.current())
         self.root.withdraw()
         self.root.update()
-        time.sleep(0.25)
         try:
             selector = RegionSelector(self.root, self.monitors[monitor_index])
             region = selector.show()
@@ -653,16 +783,50 @@ class SetupApp:
             self.region_value = region
             self._update_region_text()
             image = capture_region(region)
-            self._show_preview(image)
+            self._show_region_preview(image)
+            rule = self._current_rule()
+            if rule is not None and rule.get("detector") == "template":
+                if not self._validate_template_fits_region(rule, show_error=True):
+                    self.result_var.set("登録画像より広い監視範囲を選択してください。")
+                    return
             self.result_var.set(
-                "監視範囲を選択しました。ルールへ反映後、config.jsonへ保存してください。"
+                f"監視範囲を選択しました: {region['width']} x {region['height']}。"
+                "ルールへ反映後、config.jsonへ保存してください。"
             )
 
-    def _show_preview(self, image: Image.Image) -> None:
+    def _set_preview(
+        self,
+        label: ttk.Label,
+        photo_attribute: str,
+        image: Image.Image,
+    ) -> None:
         shown = image.copy()
-        shown.thumbnail((720, 300), Image.Resampling.LANCZOS)
-        self.preview_photo = ImageTk.PhotoImage(shown)
-        self.preview_label.configure(image=self.preview_photo, text="")
+        shown.thumbnail((500, 280), Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(shown)
+        setattr(self, photo_attribute, photo)
+        label.configure(image=photo, text="")
+
+    def _show_region_preview(self, image: Image.Image) -> None:
+        self._set_preview(
+            self.region_preview_label,
+            "region_preview_photo",
+            image,
+        )
+
+    def _show_template_preview(self, image: Image.Image) -> None:
+        self._set_preview(
+            self.template_preview_label,
+            "template_preview_photo",
+            image,
+        )
+
+    def _clear_region_preview(self, text: str = "監視範囲を選択してください。") -> None:
+        self.region_preview_photo = None
+        self.region_preview_label.configure(image="", text=text)
+
+    def _clear_template_preview(self, text: str) -> None:
+        self.template_preview_photo = None
+        self.template_preview_label.configure(image="", text=text)
 
     def _current_rule(self) -> dict[str, Any] | None:
         if self.selected_rule_index is None:
@@ -717,6 +881,20 @@ class SetupApp:
             )
             return False
 
+        if self.region_value is not None:
+            region_width = int(self.region_value["width"])
+            region_height = int(self.region_value["height"])
+            if image.width > region_width or image.height > region_height:
+                messagebox.showerror(
+                    "画像と監視範囲が一致しません",
+                    "登録画像が現在の監視範囲より大きいため登録できません。\n\n"
+                    f"監視範囲: {region_width} x {region_height}\n"
+                    f"登録画像: {image.width} x {image.height}\n\n"
+                    "監視範囲を広げてから再登録してください。",
+                    parent=self.root,
+                )
+                return False
+
         destination_dir = APP_DIR / "templates"
         destination_dir.mkdir(parents=True, exist_ok=True)
         rule_name = safe_filename(self.name_var.get() or str(rule.get("name", "rule")))
@@ -742,7 +920,7 @@ class SetupApp:
         relative = str(destination.relative_to(APP_DIR)).replace("\\", "/")
         rule["template"] = relative
         self.template_var.set(relative)
-        self._show_preview(image)
+        self._show_template_preview(image)
         self.result_var.set(f"照合画像を登録しました: {relative}")
         self._refresh_rule_list()
         if self.selected_rule_index is not None:
@@ -843,6 +1021,8 @@ class SetupApp:
                     parent=self.root,
                 )
                 return False
+            if not self._validate_template_fits_region(rule, show_error=True):
+                return False
             rule["match_threshold"] = threshold
             rule["release_threshold"] = min(
                 float(rule.get("release_threshold", 0.75)),
@@ -870,7 +1050,7 @@ class SetupApp:
             )
             return
         image = capture_region(self.region_value)
-        self._show_preview(image)
+        self._show_region_preview(image)
         name = safe_filename(str(rule.get("name", "rule")))
         path = APP_DIR / "samples" / f"{name}_current.png"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -893,7 +1073,7 @@ class SetupApp:
         if not self._apply_fields(show_message=False):
             return
         image = capture_region(self.region_value)
-        self._show_preview(image)
+        self._show_region_preview(image)
         array = np.asarray(image)
 
         if rule.get("detector") == "number":
@@ -966,18 +1146,34 @@ class SetupApp:
                 template,
                 cv2.TM_SQDIFF_NORMED,
             )
-            minimum_score, _, _, _ = cv2.minMaxLoc(result)
+            minimum_score, _, minimum_location, _ = cv2.minMaxLoc(result)
             score = 1.0 - float(minimum_score)
+            location = minimum_location
         else:
             result = cv2.matchTemplate(
                 current,
                 template,
                 cv2.TM_CCOEFF_NORMED,
             )
-            _, score, _, _ = cv2.minMaxLoc(result)
+            _, score, _, maximum_location = cv2.minMaxLoc(result)
+            location = maximum_location
         score = max(0.0, min(1.0, float(score)))
+
+        annotated = image.copy()
+        draw = ImageDraw.Draw(annotated)
+        x, y = location
+        template_height, template_width = template.shape[:2]
+        draw.rectangle(
+            (x, y, x + template_width - 1, y + template_height - 1),
+            outline="#ff2020",
+            width=3,
+        )
+        self._show_region_preview(annotated)
         self.result_var.set(
-            f"画像一致率: {score:.4f}（設定値: {rule.get('match_threshold', 0.90)}）"
+            f"画像一致率: {score:.4f}（設定値: {rule.get('match_threshold', 0.90)}） / "
+            f"検出位置: x={x}, y={y} / "
+            f"監視範囲: {image.width}x{image.height} / "
+            f"登録画像: {template_width}x{template_height}"
         )
 
     def _clear_selected_count(self) -> None:

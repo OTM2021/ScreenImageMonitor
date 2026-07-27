@@ -32,13 +32,23 @@ class WorkerEvent:
 
 
 class MonitorWorker:
-    """Run the monitoring engine without blocking the Tk event loop."""
+    """Run every monitoring rule independently from the Tk event loop.
+
+    OCR invokes an external Tesseract process and can take considerably longer
+    than image matching.  A single sequential loop therefore allowed one slow
+    OCR rule to delay every other rule.  Each rule now has its own worker loop
+    and capture context, so image rules and other OCR rules keep running while
+    one OCR call is in progress.
+    """
 
     def __init__(self, event_queue: queue.Queue[WorkerEvent]) -> None:
         self.event_queue = event_queue
         self.stop_event = threading.Event()
         self.command_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
         self.thread: threading.Thread | None = None
+        self.state_lock = threading.RLock()
+        self.status_lock = threading.Lock()
+        self.rule_error_queue: queue.Queue[tuple[BaseException, str]] = queue.Queue()
 
     @property
     def running(self) -> bool:
@@ -48,9 +58,14 @@ class MonitorWorker:
         if self.running:
             return
         self.stop_event.clear()
+        while not self.rule_error_queue.empty():
+            try:
+                self.rule_error_queue.get_nowait()
+            except queue.Empty:
+                break
         self.thread = threading.Thread(
             target=self._run,
-            name="ScreenImageMonitorWorker",
+            name="ScreenImageMonitorCoordinator",
             daemon=True,
         )
         self.thread.start()
@@ -79,20 +94,150 @@ class MonitorWorker:
                 return
 
             if command == "clear":
-                engine.clear_counts(config, states, rule_name=value)
-                self._put(
-                    "counts",
-                    {name: state.count for name, state in states.items()},
-                )
+                with self.state_lock:
+                    engine.clear_counts(config, states, rule_name=value)
+                    counts = {
+                        name: state.count
+                        for name, state in states.items()
+                    }
+                self._put("counts", counts)
+
+    @staticmethod
+    def _region_for_rule(rule: engine.Rule) -> engine.ScreenRegion:
+        region = (
+            rule.template_region
+            if rule.detector == "template"
+            else rule.number_region
+        )
+        if region is None:
+            raise ValueError(f"ルール「{rule.name}」の監視領域が未設定です。")
+        return region
+
+    def _run_rule_loop(
+        self,
+        rule: engine.Rule,
+        config: engine.AppConfig,
+        states: dict[str, engine.RuleState],
+        templates: dict[str, np.ndarray],
+        status_map: dict[str, dict[str, Any]],
+    ) -> None:
+        try:
+            region = self._region_for_rule(rule)
+            target_interval = (
+                min(config.check_interval_seconds, 0.10)
+                if rule.detector == "template"
+                else config.check_interval_seconds
+            )
+            next_deadline = time.monotonic()
+            scan_sequence = 0
+            with mss.mss() as capture:
+                while not self.stop_event.is_set():
+                    now = time.monotonic()
+                    if now < next_deadline:
+                        if self.stop_event.wait(next_deadline - now):
+                            break
+
+                    cycle_start = time.monotonic()
+                    screenshot = capture.grab(engine.region_to_dict(region))
+                    frame = np.asarray(screenshot)
+
+                    metric: str
+                    detail: str
+                    if rule.detector == "template":
+                        gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
+                        score, location, _size = engine.calculate_template_match(
+                            gray,
+                            templates[rule.name],
+                        )
+                        with self.state_lock:
+                            state = states[rule.name]
+                            engine.evaluate_template_rule(
+                                rule,
+                                state,
+                                score,
+                                config,
+                                states,
+                                evidence_image=frame,
+                            )
+                            active = state.target_is_present
+                            count = state.count
+                        metric = f"{score:.3f}"
+                        template_name = (
+                            rule.template_path.name
+                            if rule.template_path is not None
+                            else "未登録"
+                        )
+                        detail = (
+                            f"PNG/JPEG一致: {template_name} / "
+                            f"位置 x={location[0]}, y={location[1]}"
+                        )
+                    else:
+                        number, raw_text = engine.recognize_number(frame, rule)
+                        with self.state_lock:
+                            state = states[rule.name]
+                            engine.evaluate_number_rule(
+                                rule,
+                                state,
+                                number,
+                                raw_text,
+                                config,
+                                states,
+                                evidence_image=frame,
+                            )
+                            active = state.target_is_present
+                            count = state.count
+                        metric = "---" if number is None else f"{number:g}"
+                        detail = f"OCR: {raw_text}" if raw_text else "OCR待機"
+
+                    finished = time.monotonic()
+                    elapsed_ms = int(round((finished - cycle_start) * 1000))
+                    scan_sequence += 1
+                    wall_time = time.time()
+                    scan_time = (
+                        time.strftime("%H:%M:%S", time.localtime(wall_time))
+                        + f".{int((wall_time % 1) * 1000):03d}"
+                    )
+                    row = {
+                        "name": rule.name,
+                        "detector": rule.detector,
+                        "action": rule.action,
+                        "metric": metric,
+                        "detail": detail,
+                        "active": active,
+                        "count": count,
+                        "scan_time": scan_time,
+                        "scan_ms": elapsed_ms,
+                        "scan_seq": scan_sequence,
+                    }
+                    with self.status_lock:
+                        status_map[rule.name] = row
+
+                    # Keep the requested cadence when processing is fast.  If
+                    # OCR takes longer than the interval, start the next scan
+                    # immediately rather than adding another full interval.
+                    next_deadline += target_interval
+                    if next_deadline < finished:
+                        next_deadline = finished
+        except BaseException as error:
+            detail = "".join(
+                traceback.format_exception(type(error), error, error.__traceback__)
+            )
+            self.rule_error_queue.put((error, detail))
+            self.stop_event.set()
 
     def _run(self) -> None:
         engine.add_log_listener(self._log_listener)
         states: dict[str, engine.RuleState] = {}
+        rule_threads: list[threading.Thread] = []
 
         try:
             config = engine.load_config()
+            if not config.rules:
+                raise ValueError("監視ルールがありません。設定画面でルールを追加してください。")
+
             saved_counts = engine.load_counts(config.count_file)
             templates: dict[str, np.ndarray] = {}
+            status_map: dict[str, dict[str, Any]] = {}
 
             if any(rule.detector == "number" for rule in config.rules):
                 tesseract_path = engine.configure_tesseract()
@@ -104,6 +249,18 @@ class MonitorWorker:
                 states[rule.name] = engine.RuleState(
                     count=saved_counts.get(rule.name, 0)
                 )
+                status_map[rule.name] = {
+                    "name": rule.name,
+                    "detector": rule.detector,
+                    "action": rule.action,
+                    "metric": "---",
+                    "detail": "監視開始待ち",
+                    "active": False,
+                    "count": states[rule.name].count,
+                    "scan_time": "---",
+                    "scan_ms": 0,
+                    "scan_seq": 0,
+                }
 
             self._put(
                 "started",
@@ -119,95 +276,63 @@ class MonitorWorker:
                     ]
                 },
             )
-            engine.log("GUI monitoring started.")
+            engine.log(
+                "GUI monitoring started. "
+                f"Independent rule loops={len(config.rules)}, "
+                f"interval={config.check_interval_seconds:g}s."
+            )
+
+            for rule in config.rules:
+                thread = threading.Thread(
+                    target=self._run_rule_loop,
+                    args=(rule, config, states, templates, status_map),
+                    name=f"MonitorRule-{rule.name}",
+                    daemon=True,
+                )
+                rule_threads.append(thread)
+                thread.start()
 
             next_status_time = 0.0
-            with mss.mss() as capture:
-                while not self.stop_event.is_set():
-                    self._process_commands(config, states)
-                    status_rows: list[dict[str, Any]] = []
+            while not self.stop_event.is_set():
+                self._process_commands(config, states)
 
-                    for rule in config.rules:
-                        if self.stop_event.is_set():
-                            break
+                try:
+                    error, detail = self.rule_error_queue.get_nowait()
+                except queue.Empty:
+                    error = None
+                    detail = ""
+                if error is not None:
+                    raise RuntimeError(str(error)) from error
 
-                        state = states[rule.name]
-                        region = (
-                            rule.template_region
-                            if rule.detector == "template"
-                            else rule.number_region
-                        )
-                        if region is None:
-                            raise ValueError(
-                                f"ルール「{rule.name}」の監視領域が未設定です。"
-                            )
+                now = time.monotonic()
+                if now >= next_status_time:
+                    with self.status_lock:
+                        rows = [dict(status_map[rule.name]) for rule in config.rules]
+                    self._put("status", rows)
+                    next_status_time = now + 0.20
 
-                        screenshot = capture.grab(engine.region_to_dict(region))
-                        frame = np.asarray(screenshot)
+                self.stop_event.wait(0.05)
 
-                        metric: str
-                        active: bool
-                        detail = ""
-                        if rule.detector == "template":
-                            gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
-                            score, _location, _size = engine.calculate_template_match(
-                                gray,
-                                templates[rule.name],
-                            )
-                            engine.evaluate_template_rule(
-                                rule,
-                                state,
-                                score,
-                                config,
-                                states,
-                                evidence_image=frame,
-                            )
-                            metric = f"{score:.3f}"
-                            active = state.target_is_present
-                            template_name = (
-                                rule.template_path.name
-                                if rule.template_path is not None
-                                else "未登録"
-                            )
-                            detail = f"PNG/JPEG一致: {template_name}"
-                        else:
-                            number, raw_text = engine.recognize_number(frame, rule)
-                            engine.evaluate_number_rule(
-                                rule,
-                                state,
-                                number,
-                                raw_text,
-                                config,
-                                states,
-                                evidence_image=frame,
-                            )
-                            metric = "---" if number is None else f"{number:g}"
-                            active = state.target_is_present
-                            detail = f"OCR: {raw_text}" if raw_text else "OCR待機"
+            for thread in rule_threads:
+                thread.join(timeout=3.5)
 
-                        status_rows.append(
-                            {
-                                "name": rule.name,
-                                "detector": rule.detector,
-                                "action": rule.action,
-                                "metric": metric,
-                                "detail": detail,
-                                "active": active,
-                                "count": state.count,
-                            }
-                        )
+            try:
+                error, detail = self.rule_error_queue.get_nowait()
+            except queue.Empty:
+                error = None
+                detail = ""
+            if error is not None:
+                raise RuntimeError(str(error)) from error
 
-                    now = time.monotonic()
-                    if now >= next_status_time:
-                        self._put("status", status_rows)
-                        next_status_time = now + 0.25
-
-                    self.stop_event.wait(config.check_interval_seconds)
-
-            engine.save_counts(config.count_file, config.rules, states)
+            with self.state_lock:
+                engine.save_counts(config.count_file, config.rules, states)
             engine.log("GUI monitoring stopped.")
 
         except Exception as error:
+            self.stop_event.set()
+            for thread in rule_threads:
+                if thread.is_alive():
+                    thread.join(timeout=0.5)
             detail = "".join(
                 traceback.format_exception(type(error), error, error.__traceback__)
             )
@@ -865,11 +990,16 @@ class MainApplication:
                     action,
                     row["metric"],
                     state,
-                    str(row.get("detail", ""))[:80],
+                    (
+                        f"更新 {row.get('scan_time', '---')} "
+                        f"#{row.get('scan_seq', 0)} / "
+                        f"処理 {row.get('scan_ms', 0)}ms / "
+                        f"{row.get('detail', '')}"
+                    )[:120],
                 ),
             )
         self.summary_var.set(
-            f"監視ルール {len(rows)}件／条件成立 {active_count}件"
+            f"監視ルール {len(rows)}件／条件成立 {active_count}件／各ルール独立監視"
         )
         if self.counter_window is not None and self.counter_window.exists:
             self.counter_window.update_rows(rows)
