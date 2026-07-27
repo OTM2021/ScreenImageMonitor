@@ -271,4 +271,4 @@ if __name__ == "__main__":
     test_selector_is_made_visible_before_grab()
     test_monitor_is_selected_from_saved_region()
     test_rules_run_independently()
-    print("v6.2 runtime smoke test OK")
+    print("v6.3 runtime smoke test OK")

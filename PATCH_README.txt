@@ -1,8 +1,13 @@
-ScreenImageMonitor v6.2 patch
+ScreenImageMonitor v6.3 範囲選択修正パッチ
 
-ZIPを展開し、内容をGitHubリポジトリ直下へ上書きしてください。
-config.jsonは上書きしません。既存のaction:soundルールは、カウント＋音通知へ自動移行します。
+このZIPを展開し、GitHubリポジトリ直下へ上書きアップロードしてください。
+config.jsonとcounts.jsonは含めていないため、既存設定とカウントは維持されます。
 
-上書き後:
-Actions -> Build Windows Integrated GUI EXE -> Run workflow
-Artifact: ScreenImageMonitor-Windows-GUI-v6.2
+主な変更:
+- 「画面から範囲選択」へ名称統一
+- 範囲選択画面を独立プロセスで起動
+- 設定画面のmodal/grab状態に依存しない表示方式
+- GitHub Actionsに範囲選択ヘルパー検査を追加
+
+再ビルド後のArtifact:
+ScreenImageMonitor-Windows-GUI-v6.3

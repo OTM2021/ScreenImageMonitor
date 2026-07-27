@@ -18,7 +18,11 @@ import tkinter.font as tkfont
 from tkinter import messagebox, ttk
 
 import screen_image_monitor as engine
-from screen_setup_gui import open_setup_window, set_dpi_awareness
+from screen_setup_gui import (
+    open_setup_window,
+    run_region_selector_helper,
+    set_dpi_awareness,
+)
 
 
 APP_DIR = engine.APP_DIR
@@ -594,7 +598,7 @@ class MainApplication:
 
         ttk.Button(
             toolbar,
-            text="選択ルールの監視範囲を指定",
+            text="画面から範囲選択",
             command=self.select_monitoring_region,
         ).pack(side="left", padx=(8, 0))
 
@@ -1061,7 +1065,13 @@ class MainApplication:
             self.root.destroy()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "--region-selector-helper":
+        if len(arguments) != 3:
+            return 2
+        return run_region_selector_helper(arguments[1], arguments[2])
+
     set_dpi_awareness()
     root = tk.Tk()
     try:

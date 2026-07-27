@@ -4,7 +4,10 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -129,24 +132,35 @@ def capture_region(region: dict[str, int]) -> Image.Image:
 
 
 class RegionSelector:
-    """Select an exact desktop region on a reliable full-monitor overlay.
+    """Select an exact desktop region on a full-monitor overlay.
 
-    The selector is built while the setup window is hidden, but it is only
-    displayed after the setup window is restored.  This avoids a Windows/Tk
-    issue where a borderless child of a withdrawn modal window can remain
-    non-viewable.  The captured desktop is dimmed and surrounded by a red
-    border so that the selection screen is visually obvious.
+    In normal source tests this can still be hosted by a Toplevel.  The
+    production GUI launches it in a separate process and uses that process's
+    Tk root as the overlay, avoiding modal-grab and withdrawn-parent issues on
+    Windows.
     """
 
-    def __init__(self, parent: tk.Misc, monitor: dict[str, int]) -> None:
+    def __init__(
+        self,
+        parent: tk.Misc,
+        monitor: dict[str, int],
+        *,
+        use_parent_window: bool = False,
+        restore_parent: bool = True,
+    ) -> None:
         self.result: dict[str, int] | None = None
         self.parent = parent.winfo_toplevel()
+        self.restore_parent = restore_parent
+        self.use_parent_window = use_parent_window
         self.monitor = {key: int(value) for key, value in monitor.items()}
         original = capture_region(self.monitor).convert("RGB")
         shade = Image.new("RGB", original.size, (0, 0, 0))
         self.original = Image.blend(original, shade, 0.30)
 
-        self.window = tk.Toplevel(self.parent)
+        if self.use_parent_window:
+            self.window = self.parent
+        else:
+            self.window = tk.Toplevel(self.parent)
         self.window.withdraw()
         self.window.title("監視範囲を選択")
         self.window.overrideredirect(True)
@@ -293,17 +307,66 @@ class RegionSelector:
             self.window.focus_force()
             self.window.grab_set()
             self.window.after_idle(lambda: self.window.attributes("-topmost", True))
-            self.window.wait_window()
+            if getattr(self, "use_parent_window", False):
+                self.window.mainloop()
+            else:
+                self.window.wait_window()
             return self.result
         finally:
-            try:
-                if self.parent.winfo_exists():
-                    self.parent.deiconify()
-                    self.parent.lift()
-                    self.parent.focus_force()
-                    self.parent.grab_set()
-            except tk.TclError:
-                pass
+            if getattr(self, "restore_parent", True) and self.parent is not self.window:
+                try:
+                    if self.parent.winfo_exists():
+                        self.parent.deiconify()
+                        self.parent.lift()
+                        self.parent.focus_force()
+                        self.parent.grab_set()
+                except tk.TclError:
+                    pass
+
+
+def run_region_selector_helper(monitor_json: str, result_path: str | Path) -> int:
+    """Run the range selector in a separate process.
+
+    A modal Tk grab in the settings window could prevent the in-process
+    borderless selector from becoming visible on some Windows systems.  The
+    helper owns an independent Tk interpreter and uses its root window as the
+    full-screen overlay, so no parent-window visibility or grab state can hide
+    it.
+    """
+    output = Path(result_path)
+    try:
+        monitor_raw = json.loads(monitor_json)
+        if not isinstance(monitor_raw, dict):
+            raise ValueError("monitor must be a JSON object")
+        monitor = {
+            key: int(monitor_raw[key])
+            for key in ("left", "top", "width", "height")
+        }
+        if monitor["width"] < 1 or monitor["height"] < 1:
+            raise ValueError("monitor dimensions must be positive")
+
+        set_dpi_awareness()
+        root = tk.Tk()
+        root.withdraw()
+        root.update_idletasks()
+        selector = RegionSelector(
+            root,
+            monitor,
+            use_parent_window=True,
+            restore_parent=False,
+        )
+        region = selector.show()
+        if region is not None:
+            save_json(output, {"status": "selected", "region": region})
+        else:
+            save_json(output, {"status": "cancelled"})
+        return 0
+    except Exception as error:
+        try:
+            save_json(output, {"status": "error", "message": str(error)})
+        except Exception:
+            pass
+        return 1
 
 
 class SetupApp:
@@ -328,7 +391,7 @@ class SetupApp:
         if not isinstance(raw, dict):
             raw = {}
         self.config = ensure_absolute_config(raw)
-        # v6.2: every detector counts; sound is an optional notification.
+        # v6.3: every detector counts; sound is an optional notification.
         # Migrate legacy sound-only rules without requiring manual recreation.
         for rule in self.config.get("rules", []):
             if not isinstance(rule, dict):
@@ -430,7 +493,7 @@ class SetupApp:
         region_frame.columnconfigure(0, weight=1)
         self.region_var = tk.StringVar(value="未設定")
         ttk.Entry(region_frame, textvariable=self.region_var, state="readonly").grid(row=0, column=0, sticky="ew")
-        ttk.Button(region_frame, text="画面からドラッグ選択", command=self._select_region).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(region_frame, text="画面から範囲選択", command=self._select_region).grid(row=0, column=1, padx=(8, 0))
 
         self.template_label = ttk.Label(right, text="登録画像")
         self.template_label.grid(row=5, column=0, sticky="w", pady=4)
@@ -819,47 +882,122 @@ class SetupApp:
                 parent=self.root,
             )
             return
+
         monitor_index = max(0, self.monitor_combo.current())
-        selector: RegionSelector | None = None
-        self.root.withdraw()
-        self.root.update_idletasks()
-        self.root.update()
+        monitor = self.monitors[monitor_index]
+        result_path = Path(tempfile.gettempdir()) / (
+            f"screen_image_monitor_region_{uuid.uuid4().hex}.json"
+        )
+
+        if getattr(sys, "frozen", False):
+            command = [sys.executable]
+        else:
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve().with_name("screen_image_monitor_gui.py")),
+            ]
+        command.extend(
+            [
+                "--region-selector-helper",
+                json.dumps(monitor, ensure_ascii=False),
+                str(result_path),
+            ]
+        )
+
         try:
-            # Build the selector and capture the desktop while the setup window
-            # is hidden.  Display it only after the setup window is viewable.
-            selector = RegionSelector(self.root, self.monitors[monitor_index])
+            try:
+                self.root.grab_release()
+            except tk.TclError:
+                pass
+            self.root.withdraw()
+            self.root.update_idletasks()
+
+            completed = subprocess.run(
+                command,
+                check=False,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            messagebox.showerror(
+                "監視範囲",
+                "画面から範囲選択がタイムアウトしました。",
+                parent=self.root,
+            )
+            return
+        except OSError as error:
+            messagebox.showerror(
+                "監視範囲",
+                "画面から範囲選択を起動できませんでした。\n"
+                f"{error}",
+                parent=self.root,
+            )
+            return
         finally:
             self.root.deiconify()
             self.root.update_idletasks()
             self.root.lift()
             self.root.focus_force()
+            try:
+                self.root.grab_set()
+            except tk.TclError:
+                pass
 
-        if selector is None:
-            return
+        payload = load_json(result_path, {})
         try:
-            region = selector.show()
-        except tk.TclError as error:
+            result_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        if not isinstance(payload, dict):
+            payload = {}
+        status = payload.get("status")
+        if status == "cancelled":
+            self.result_var.set("画面から範囲選択をキャンセルしました。")
+            return
+        if completed.returncode != 0 or status == "error":
+            detail = str(payload.get("message", "不明なエラー"))
             messagebox.showerror(
                 "監視範囲",
-                "監視範囲の選択画面を表示できませんでした。\n"
-                f"{error}",
+                "画面から範囲選択を起動できませんでした。\n"
+                f"{detail}",
                 parent=self.root,
             )
             return
-        if region:
-            self.region_value = region
-            self._update_region_text()
-            image = capture_region(region)
-            self._show_region_preview(image)
-            rule = self._current_rule()
-            if rule is not None and rule.get("detector") == "template":
-                if not self._validate_template_fits_region(rule, show_error=True):
-                    self.result_var.set("登録画像より広い監視範囲を選択してください。")
-                    return
-            self.result_var.set(
-                f"監視範囲を選択しました: {region['width']} x {region['height']}。"
-                "ルールへ反映後、config.jsonへ保存してください。"
+
+        region = payload.get("region")
+        if not isinstance(region, dict):
+            messagebox.showerror(
+                "監視範囲",
+                "選択結果を取得できませんでした。",
+                parent=self.root,
             )
+            return
+        try:
+            region = {
+                key: int(region[key])
+                for key in ("left", "top", "width", "height")
+            }
+        except (KeyError, TypeError, ValueError):
+            messagebox.showerror(
+                "監視範囲",
+                "選択結果の座標が不正です。",
+                parent=self.root,
+            )
+            return
+
+        self.region_value = region
+        self._update_region_text()
+        image = capture_region(region)
+        self._show_region_preview(image)
+        rule = self._current_rule()
+        if rule is not None and rule.get("detector") == "template":
+            if not self._validate_template_fits_region(rule, show_error=True):
+                self.result_var.set("登録画像より広い監視範囲を選択してください。")
+                return
+        self.result_var.set(
+            f"監視範囲を選択しました: {region['width']} x {region['height']}。"
+            "ルールへ反映後、config.jsonへ保存してください。"
+        )
 
     def _set_preview(
         self,
@@ -1029,7 +1167,7 @@ class SetupApp:
         if self.region_value is None:
             messagebox.showerror(
                 "設定",
-                "GUIの「画面からドラッグ選択」で監視範囲を指定してください。",
+                "GUIの「画面から範囲選択」で監視範囲を指定してください。",
                 parent=self.root,
             )
             return False
