@@ -129,21 +129,24 @@ def capture_region(region: dict[str, int]) -> Image.Image:
 
 
 class RegionSelector:
-    """Select an exact desktop region on a 1:1 monitor overlay.
+    """Select an exact desktop region on a reliable full-monitor overlay.
 
-    The previous selector resized a screenshot to fit a normal window and then
-    converted the scaled drag coordinates back to desktop coordinates.  That
-    approach can drift on mixed-DPI or multi-monitor Windows environments.
-    This selector places a borderless screenshot overlay directly on the
-    selected monitor, so one canvas pixel always equals one desktop pixel.
+    The selector is built while the setup window is hidden, but it is only
+    displayed after the setup window is restored.  This avoids a Windows/Tk
+    issue where a borderless child of a withdrawn modal window can remain
+    non-viewable.  The captured desktop is dimmed and surrounded by a red
+    border so that the selection screen is visually obvious.
     """
 
     def __init__(self, parent: tk.Misc, monitor: dict[str, int]) -> None:
         self.result: dict[str, int] | None = None
+        self.parent = parent.winfo_toplevel()
         self.monitor = {key: int(value) for key, value in monitor.items()}
-        self.original = capture_region(self.monitor)
+        original = capture_region(self.monitor).convert("RGB")
+        shade = Image.new("RGB", original.size, (0, 0, 0))
+        self.original = Image.blend(original, shade, 0.30)
 
-        self.window = tk.Toplevel(parent)
+        self.window = tk.Toplevel(self.parent)
         self.window.withdraw()
         self.window.title("監視範囲を選択")
         self.window.overrideredirect(True)
@@ -163,22 +166,30 @@ class RegionSelector:
             cursor="crosshair",
             highlightthickness=0,
             borderwidth=0,
+            background="#202020",
         )
         self.canvas.pack(fill="both", expand=True)
         self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
         self.canvas.create_rectangle(
+            2,
+            2,
+            max(3, width - 3),
+            max(3, height - 3),
+            outline="#ff3030",
+            width=4,
+        )
+        self.canvas.create_rectangle(
             16,
             16,
-            min(width - 16, 660),
-            68,
+            min(width - 16, 780),
+            78,
             fill="#101010",
             outline="#ffffff",
-            width=1,
-            stipple="gray50",
+            width=2,
         )
         self.canvas.create_text(
-            30,
-            42,
+            32,
+            47,
             anchor="w",
             fill="#ffffff",
             font=("Yu Gothic UI", 14, "bold"),
@@ -199,11 +210,6 @@ class RegionSelector:
         self.window.bind("<Escape>", lambda _event: self._cancel())
         self.window.protocol("WM_DELETE_WINDOW", self._cancel)
 
-        self.window.deiconify()
-        self.window.lift()
-        self.window.focus_force()
-        self.window.grab_set()
-
     def _clamp_x(self, value: int) -> int:
         return max(0, min(value, self.monitor["width"] - 1))
 
@@ -223,7 +229,7 @@ class RegionSelector:
             self.start_y,
             self.end_x,
             self.end_y,
-            outline="#ff2020",
+            outline="#00ff60",
             width=4,
         )
 
@@ -269,11 +275,35 @@ class RegionSelector:
     def _cancel(self) -> None:
         self.confirm_pending = False
         self.result = None
-        self.window.destroy()
+        if self.window.winfo_exists():
+            self.window.destroy()
 
     def show(self) -> dict[str, int] | None:
-        self.window.wait_window()
-        return self.result
+        try:
+            try:
+                self.parent.grab_release()
+            except tk.TclError:
+                pass
+
+            self.window.deiconify()
+            self.window.update_idletasks()
+            self.window.wait_visibility()
+            self.window.attributes("-topmost", True)
+            self.window.lift()
+            self.window.focus_force()
+            self.window.grab_set()
+            self.window.after_idle(lambda: self.window.attributes("-topmost", True))
+            self.window.wait_window()
+            return self.result
+        finally:
+            try:
+                if self.parent.winfo_exists():
+                    self.parent.deiconify()
+                    self.parent.lift()
+                    self.parent.focus_force()
+                    self.parent.grab_set()
+            except tk.TclError:
+                pass
 
 
 class SetupApp:
@@ -298,6 +328,18 @@ class SetupApp:
         if not isinstance(raw, dict):
             raw = {}
         self.config = ensure_absolute_config(raw)
+        # v6.2: every detector counts; sound is an optional notification.
+        # Migrate legacy sound-only rules without requiring manual recreation.
+        for rule in self.config.get("rules", []):
+            if not isinstance(rule, dict):
+                continue
+            legacy_action = rule.get("action", "count")
+            rule["sound_enabled"] = bool(
+                rule.get("sound_enabled", legacy_action == "sound")
+            )
+            rule["action"] = "count"
+            rule.setdefault("sound", "sounds/alert.wav")
+            rule.setdefault("save_evidence", True)
         self.counts = load_json(APP_DIR / str(self.config.get("count_file", "counts.json")), {})
         if not isinstance(self.counts, dict):
             self.counts = {}
@@ -341,10 +383,16 @@ class SetupApp:
         self.rule_list.grid(row=0, column=0, columnspan=2, sticky="nsew")
         self.rule_list.bind("<<ListboxSelect>>", self._on_rule_select)
 
-        ttk.Button(left, text="数値カウント追加", command=lambda: self._add_rule("number", "count")).grid(row=1, column=0, sticky="ew", pady=(8, 3))
-        ttk.Button(left, text="数値音通知追加", command=lambda: self._add_rule("number", "sound")).grid(row=1, column=1, sticky="ew", pady=(8, 3))
-        ttk.Button(left, text="画像カウント追加", command=lambda: self._add_rule("template", "count")).grid(row=2, column=0, sticky="ew", pady=3)
-        ttk.Button(left, text="画像音通知追加", command=lambda: self._add_rule("template", "sound")).grid(row=2, column=1, sticky="ew", pady=3)
+        ttk.Button(
+            left,
+            text="数字OCRルール追加",
+            command=lambda: self._add_rule("number"),
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 3))
+        ttk.Button(
+            left,
+            text="画像一致ルール追加",
+            command=lambda: self._add_rule("template"),
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=3)
         ttk.Button(left, text="選択ルール削除", command=self._delete_rule).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         right = ttk.Frame(outer)
@@ -356,7 +404,7 @@ class SetupApp:
         self.name_var = tk.StringVar()
         ttk.Entry(right, textvariable=self.name_var).grid(row=0, column=1, sticky="ew", pady=4)
 
-        ttk.Label(right, text="方式 / 動作").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Label(right, text="判定方式").grid(row=1, column=0, sticky="w", pady=4)
         self.type_label = ttk.Label(right, text="-")
         self.type_label.grid(row=1, column=1, sticky="w", pady=4)
 
@@ -449,12 +497,19 @@ class SetupApp:
         self.required_var = tk.StringVar(value="2")
         ttk.Entry(common_options_frame, textvariable=self.required_var).grid(row=0, column=1, sticky="ew", pady=3)
 
+        self.sound_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            common_options_frame,
+            text="カウントアップ時に音通知する",
+            variable=self.sound_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=3)
+
         self.evidence_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             common_options_frame,
-            text="動作時に証跡スクリーンショットを保存する",
+            text="カウントアップ時に証跡スクリーンショットを保存する",
             variable=self.evidence_var,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=3)
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=3)
 
         action_frame = ttk.Frame(right)
         action_frame.grid(row=7, column=0, columnspan=2, sticky="ew", pady=4)
@@ -518,14 +573,14 @@ class SetupApp:
         self.rule_list.delete(0, tk.END)
         for rule in self.config.get("rules", []):
             detector = "数字" if rule.get("detector") == "number" else "画像"
-            action = "カウント" if rule.get("action") == "count" else "音"
-            count = self.counts.get(rule.get("name", ""), 0) if action == "カウント" else "-"
+            sound_suffix = "＋音" if bool(rule.get("sound_enabled", False)) else ""
+            count = self.counts.get(rule.get("name", ""), 0)
             suffix = ""
             if detector == "画像" and not self._template_is_valid(rule):
                 suffix = " [画像未登録]"
             self.rule_list.insert(
                 tk.END,
-                f"{rule.get('name', '(名称なし)')} [{detector}/{action}] ({count}){suffix}",
+                f"{rule.get('name', '(名称なし)')} [{detector}/カウント{sound_suffix}] ({count}){suffix}",
             )
 
     def _on_rule_select(self, _event: tk.Event | None = None) -> None:
@@ -539,16 +594,10 @@ class SetupApp:
         rule = self.config["rules"][index]
         self.name_var.set(str(rule.get("name", "")))
         detector = str(rule.get("detector", "number"))
-        action = str(rule.get("action", "count"))
         self.type_label.configure(
-            text=f"{'数字OCR' if detector == 'number' else '画像一致'} / "
-            f"{'カウントアップ' if action == 'count' else '音通知'}"
+            text="数字OCR" if detector == "number" else "画像一致"
         )
-        self.count_var.set(
-            str(self.counts.get(rule.get("name", ""), 0))
-            if action == "count"
-            else "-"
-        )
+        self.count_var.set(str(self.counts.get(rule.get("name", ""), 0)))
         self.region_value = (
             rule.get("region") if isinstance(rule.get("region"), dict) else None
         )
@@ -572,7 +621,8 @@ class SetupApp:
         self.maximum_var.set(str(condition.get("maximum", 100)))
         self.threshold_var.set(str(rule.get("match_threshold", 0.90)))
         self.required_var.set(str(rule.get("required_matches", 2)))
-        self.evidence_var.set(bool(rule.get("save_evidence", action == "count")))
+        self.sound_var.set(bool(rule.get("sound_enabled", False)))
+        self.evidence_var.set(bool(rule.get("save_evidence", True)))
         self.result_var.set("")
 
         if detector == "template":
@@ -676,7 +726,7 @@ class SetupApp:
             )
         return fits
 
-    def _add_rule(self, detector: str, action: str) -> None:
+    def _add_rule(self, detector: str) -> None:
         name = simpledialog.askstring(
             "ルール追加",
             "ルール名を入力してください。",
@@ -694,16 +744,16 @@ class SetupApp:
         rule: dict[str, Any] = {
             "name": name,
             "detector": detector,
-            "action": action,
+            "action": "count",
+            "sound_enabled": False,
+            "sound": "sounds/alert.wav",
             "region": None,
             "required_matches": 2,
-            "save_evidence": action == "count",
+            "save_evidence": True,
         }
-        if action == "sound":
-            rule["sound"] = "sounds/alert.wav"
         if detector == "number":
             rule["condition"] = {
-                "operator": "increase" if action == "count" else "ge",
+                "operator": "increase",
                 "value": 100,
                 "tolerance": 0,
                 "trigger_on_initial": False,
@@ -770,15 +820,32 @@ class SetupApp:
             )
             return
         monitor_index = max(0, self.monitor_combo.current())
+        selector: RegionSelector | None = None
         self.root.withdraw()
+        self.root.update_idletasks()
         self.root.update()
         try:
+            # Build the selector and capture the desktop while the setup window
+            # is hidden.  Display it only after the setup window is viewable.
             selector = RegionSelector(self.root, self.monitors[monitor_index])
-            region = selector.show()
         finally:
             self.root.deiconify()
+            self.root.update_idletasks()
             self.root.lift()
             self.root.focus_force()
+
+        if selector is None:
+            return
+        try:
+            region = selector.show()
+        except tk.TclError as error:
+            messagebox.showerror(
+                "監視範囲",
+                "監視範囲の選択画面を表示できませんでした。\n"
+                f"{error}",
+                parent=self.root,
+            )
+            return
         if region:
             self.region_value = region
             self._update_region_text()
@@ -982,6 +1049,9 @@ class SetupApp:
         rule["name"] = name
         rule["region"] = dict(self.region_value)
         rule["required_matches"] = required
+        rule["action"] = "count"
+        rule["sound_enabled"] = bool(self.sound_var.get())
+        rule["sound"] = "sounds/alert.wav"
         rule["save_evidence"] = bool(self.evidence_var.get())
 
         if old_name != name and old_name in self.counts:
@@ -1178,7 +1248,7 @@ class SetupApp:
 
     def _clear_selected_count(self) -> None:
         rule = self._current_rule()
-        if rule is None or rule.get("action") != "count":
+        if rule is None:
             return
         name = str(rule.get("name", ""))
         self.counts[name] = 0

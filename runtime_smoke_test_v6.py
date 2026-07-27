@@ -29,6 +29,62 @@ class DummyWindow:
         self.destroyed = True
 
 
+class DummyParent:
+    def __init__(self) -> None:
+        self.actions: list[str] = []
+
+    def grab_release(self) -> None:
+        self.actions.append("grab_release")
+
+    def winfo_exists(self) -> bool:
+        return True
+
+    def deiconify(self) -> None:
+        self.actions.append("deiconify")
+
+    def lift(self) -> None:
+        self.actions.append("lift")
+
+    def focus_force(self) -> None:
+        self.actions.append("focus_force")
+
+    def grab_set(self) -> None:
+        self.actions.append("grab_set")
+
+
+class DummySelectorWindow:
+    def __init__(self) -> None:
+        self.actions: list[str] = []
+
+    def deiconify(self) -> None:
+        self.actions.append("deiconify")
+
+    def update_idletasks(self) -> None:
+        self.actions.append("update_idletasks")
+
+    def wait_visibility(self) -> None:
+        self.actions.append("wait_visibility")
+
+    def attributes(self, *_args) -> None:
+        self.actions.append("attributes")
+
+    def lift(self) -> None:
+        self.actions.append("lift")
+
+    def focus_force(self) -> None:
+        self.actions.append("focus_force")
+
+    def grab_set(self) -> None:
+        self.actions.append("grab_set")
+
+    def after_idle(self, callback) -> None:
+        self.actions.append("after_idle")
+        callback()
+
+    def wait_window(self) -> None:
+        self.actions.append("wait_window")
+
+
 class DummyCombo:
     def __init__(self) -> None:
         self.value = -1
@@ -86,6 +142,21 @@ def test_exact_region_coordinates() -> None:
     assert selector.window.destroyed
 
 
+def test_selector_is_made_visible_before_grab() -> None:
+    selector = object.__new__(RegionSelector)
+    selector.parent = DummyParent()
+    selector.window = DummySelectorWindow()
+    selector.result = {"left": 1, "top": 2, "width": 3, "height": 4}
+
+    result = RegionSelector.show(selector)
+    assert result == selector.result
+    actions = selector.window.actions
+    assert actions.index("deiconify") < actions.index("wait_visibility")
+    assert actions.index("wait_visibility") < actions.index("grab_set")
+    assert selector.parent.actions[0] == "grab_release"
+    assert selector.parent.actions[-1] == "grab_set"
+
+
 def test_monitor_is_selected_from_saved_region() -> None:
     app = object.__new__(SetupApp)
     app.monitors = [
@@ -141,6 +212,7 @@ def test_rules_run_independently() -> None:
             name="image",
             detector="template",
             action="count",
+            sound_enabled=False,
             template_region=region,
             number_region=None,
             template_path=Path("template.png"),
@@ -149,6 +221,7 @@ def test_rules_run_independently() -> None:
             name="number",
             detector="number",
             action="count",
+            sound_enabled=False,
             template_region=None,
             number_region=region,
         )
@@ -195,6 +268,7 @@ def test_rules_run_independently() -> None:
 
 if __name__ == "__main__":
     test_exact_region_coordinates()
+    test_selector_is_made_visible_before_grab()
     test_monitor_is_selected_from_saved_region()
     test_rules_run_independently()
-    print("v6 runtime smoke test OK")
+    print("v6.2 runtime smoke test OK")

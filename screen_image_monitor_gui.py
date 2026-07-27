@@ -201,6 +201,7 @@ class MonitorWorker:
                         "name": rule.name,
                         "detector": rule.detector,
                         "action": rule.action,
+                        "sound_enabled": rule.sound_enabled,
                         "metric": metric,
                         "detail": detail,
                         "active": active,
@@ -253,6 +254,7 @@ class MonitorWorker:
                     "name": rule.name,
                     "detector": rule.detector,
                     "action": rule.action,
+                    "sound_enabled": rule.sound_enabled,
                     "metric": "---",
                     "detail": "監視開始待ち",
                     "active": False,
@@ -270,6 +272,7 @@ class MonitorWorker:
                             "name": rule.name,
                             "detector": rule.detector,
                             "action": rule.action,
+                            "sound_enabled": rule.sound_enabled,
                             "count": states[rule.name].count,
                         }
                         for rule in config.rules
@@ -445,8 +448,6 @@ class CounterWindow:
             self.tree.delete(*children)
 
         for rule in rules:
-            if rule.action != "count":
-                continue
             self.tree.insert(
                 "",
                 "end",
@@ -460,8 +461,6 @@ class CounterWindow:
 
     def update_rows(self, rows: list[dict[str, Any]]) -> None:
         for row in rows:
-            if row.get("action") != "count":
-                continue
             name = str(row["name"])
             if not self.tree.exists(name):
                 self.tree.insert("", "end", iid=name, text=name)
@@ -740,10 +739,7 @@ class MainApplication:
         if children:
             self.tree.delete(*children)
 
-        count_rules = 0
         for rule in config.rules:
-            if rule.action == "count":
-                count_rules += 1
             self.tree.insert(
                 "",
                 "end",
@@ -751,7 +747,7 @@ class MainApplication:
                 text=rule.name,
                 values=(
                     "数字OCR" if rule.detector == "number" else "画像一致",
-                    "カウント" if rule.action == "count" else "音通知",
+                    "カウント＋音" if rule.sound_enabled else "カウント",
                     "---",
                     "停止",
                     "OCR待機" if rule.detector == "number" else "PNG/JPEG画像一致",
@@ -761,8 +757,9 @@ class MainApplication:
         if selected_name and self.tree.exists(selected_name):
             self.tree.selection_set(selected_name)
 
+        sound_rules = sum(1 for rule in config.rules if rule.sound_enabled)
         self.summary_var.set(
-            f"ルール {len(config.rules)}件／カウント対象 {count_rules}件"
+            f"ルール {len(config.rules)}件／音通知 {sound_rules}件"
         )
         if self.counter_window is not None and self.counter_window.exists:
             self.counter_window.set_rules(config.rules, counts)
@@ -851,10 +848,10 @@ class MainApplication:
         except Exception as error:
             messagebox.showerror("カウントクリア", str(error), parent=self.root)
             return
-        if target is None or target.action != "count":
+        if target is None:
             messagebox.showinfo(
                 "カウントクリア",
-                "選択ルールはカウント対象ではありません。",
+                "選択ルールが見つかりません。",
                 parent=self.root,
             )
             return
@@ -978,7 +975,7 @@ class MainApplication:
             if not self.tree.exists(name):
                 self.tree.insert("", "end", iid=name, text=name)
             detector = "数字OCR" if row["detector"] == "number" else "画像一致"
-            action = "カウント" if row["action"] == "count" else "音通知"
+            action = "カウント＋音" if row.get("sound_enabled") else "カウント"
             state = "成立" if row["active"] else "監視中"
             if row["active"]:
                 active_count += 1

@@ -18,7 +18,7 @@ import numpy as np
 import pytesseract
 
 
-ActionType = Literal["sound", "count"]
+ActionType = Literal["count"]
 DetectorType = Literal["template", "number"]
 NumberOperator = Literal[
     "eq",
@@ -92,6 +92,7 @@ class Rule:
     detector: DetectorType
     action: ActionType
     required_matches: int
+    sound_enabled: bool = False
     sound_path: Path | None = None
 
     # Template detector settings
@@ -417,10 +418,18 @@ def load_config() -> AppConfig:
             raise ValueError(f"Rule name is duplicated: {name}")
         seen_names.add(name)
 
-        action = item.get("action")
-        if action not in ("sound", "count"):
+        # v6.2 integrates sound notification into every count rule.
+        # Legacy action="sound" rules are migrated to count + sound_enabled.
+        legacy_action = item.get("action", "count")
+        if legacy_action not in ("sound", "count"):
             raise ValueError(
-                f"Rule '{name}': 'action' must be 'sound' or 'count'."
+                f"Rule '{name}': legacy 'action' must be 'sound' or 'count'."
+            )
+        action: ActionType = "count"
+        sound_enabled = item.get("sound_enabled", legacy_action == "sound")
+        if not isinstance(sound_enabled, bool):
+            raise ValueError(
+                f"Rule '{name}': 'sound_enabled' must be true or false."
             )
 
         detector = item.get("detector")
@@ -434,12 +443,11 @@ def load_config() -> AppConfig:
         required_matches = require_positive_int(item, "required_matches")
 
         sound_path: Path | None = None
-        if action == "sound":
-            sound_value = item.get("sound", "")
-            if isinstance(sound_value, str) and sound_value.strip():
-                sound_path = resolve_app_path(sound_value)
+        sound_value = item.get("sound", "sounds/alert.wav")
+        if isinstance(sound_value, str) and sound_value.strip():
+            sound_path = resolve_app_path(sound_value)
 
-        save_evidence = item.get("save_evidence", action == "count")
+        save_evidence = item.get("save_evidence", True)
         if not isinstance(save_evidence, bool):
             raise ValueError(
                 f"Rule '{name}': 'save_evidence' must be true or false."
@@ -502,7 +510,8 @@ def load_config() -> AppConfig:
                     detector="template",
                     action=action,
                     required_matches=required_matches,
-                    sound_path=sound_path,
+                    sound_enabled=sound_enabled,
+                sound_path=sound_path,
                     template_path=resolve_app_path(template_value),
                     template_region=template_region,
                     match_threshold=match_threshold,
@@ -543,6 +552,7 @@ def load_config() -> AppConfig:
                 detector="number",
                 action=action,
                 required_matches=required_matches,
+                sound_enabled=sound_enabled,
                 sound_path=sound_path,
                 number_region=number_region,
                 number_condition=condition,
@@ -591,7 +601,6 @@ def save_counts(path: Path, rules: list[Rule], states: dict[str, RuleState]) -> 
     data = {
         rule.name: states[rule.name].count
         for rule in rules
-        if rule.action == "count"
     }
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -607,9 +616,7 @@ def clear_counts(
     states: dict[str, RuleState],
     rule_name: str | None = None,
 ) -> None:
-    count_rule_names = {
-        rule.name for rule in config.rules if rule.action == "count"
-    }
+    count_rule_names = {rule.name for rule in config.rules}
 
     if rule_name is not None:
         if rule_name not in count_rule_names:
@@ -896,7 +903,7 @@ def save_evidence_image(
     rule_dir = config.evidence_dir / safe_name
     rule_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    count_suffix = f"_count{state.count:06d}" if rule.action == "count" else ""
+    count_suffix = f"_count{state.count:06d}"
     number_suffix = "" if detected_number is None else f"_value{detected_number:g}"
     path = rule_dir / f"{timestamp}{count_suffix}{number_suffix}.png"
 
@@ -923,18 +930,16 @@ def execute_action(
     evidence_image: np.ndarray | None = None,
 ) -> None:
     detail = "" if detected_number is None else f" Number={detected_number:g}."
-    if rule.action == "sound":
-        log(f"[{rule.name}] SOUND action executed.{detail}")
-        save_evidence_image(rule, state, config, evidence_image, detected_number)
-        play_sound(rule)
-        return
-
     state.count += 1
     save_counts(config.count_file, config.rules, states)
     save_evidence_image(rule, state, config, evidence_image, detected_number)
+    sound_text = " + SOUND" if rule.sound_enabled else ""
     log(
-        f"[{rule.name}] COUNT action executed. Current count: {state.count}.{detail}"
+        f"[{rule.name}] COUNT{sound_text} action executed. "
+        f"Current count: {state.count}.{detail}"
     )
+    if rule.sound_enabled:
+        play_sound(rule)
 
 
 def evaluate_template_rule(
@@ -1104,7 +1109,7 @@ def format_status(
             if raw_text and metric is None:
                 metric_text = f"OCR:{raw_text[:12]}"
 
-        count_text = f"/count={state.count}" if rule.action == "count" else ""
+        count_text = f"/count={state.count}"
         parts.append(f"{rule.name}:{metric_text}/{status}{count_text}")
     return " | ".join(parts)
 
@@ -1140,7 +1145,7 @@ def monitor(config: AppConfig) -> None:
         if rule.detector == "template":
             assert rule.template_region is not None
             log(
-                f"Rule '{rule.name}': detector=template, action={rule.action}, "
+                f"Rule '{rule.name}': detector=template, action=count, sound={rule.sound_enabled}, "
                 f"region=({rule.template_region.left},{rule.template_region.top},"
                 f"{rule.template_region.width},{rule.template_region.height}), "
                 f"match={rule.match_threshold}, release={rule.release_threshold}, "
@@ -1149,7 +1154,7 @@ def monitor(config: AppConfig) -> None:
         else:
             assert rule.number_region is not None and rule.number_condition is not None
             log(
-                f"Rule '{rule.name}': detector=number, action={rule.action}, "
+                f"Rule '{rule.name}': detector=number, action=count, sound={rule.sound_enabled}, "
                 f"operator={rule.number_condition.operator}, "
                 f"region=({rule.number_region.left},{rule.number_region.top},"
                 f"{rule.number_region.width},{rule.number_region.height}), "

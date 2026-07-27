@@ -7,6 +7,16 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+import sys
+import types
+
+try:
+    import mss as _mss  # noqa: F401
+except ModuleNotFoundError:
+    stub = types.ModuleType("mss")
+    stub.mss = lambda: None
+    sys.modules["mss"] = stub
+
 import screen_image_monitor as engine
 
 

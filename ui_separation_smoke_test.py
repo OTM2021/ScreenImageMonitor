@@ -21,7 +21,13 @@ def main() -> None:
         "Generic detector detail heading is missing from screen_image_monitor_gui.py"
     )
 
-    print("Detector UI separation check OK")
+    assert "数字OCRルール追加" in setup_text
+    assert "画像一致ルール追加" in setup_text
+    assert "数値音通知追加" not in setup_text
+    assert "画像音通知追加" not in setup_text
+    assert "カウントアップ時に音通知する" in setup_text
+
+    print("Detector UI separation and action integration check OK")
 
 
 if __name__ == "__main__":
