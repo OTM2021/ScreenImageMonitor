@@ -6,48 +6,24 @@
   "evidence_dir": "evidence",
   "rules": [
     {
-      "name": "数値増加回数",
+      "name": "ルール1",
       "detector": "number",
       "action": "count",
-      "region": {
-        "left": 750,
-        "top": 250,
-        "width": 180,
-        "height": 60
-      },
-      "condition": {
-        "operator": "increase",
-        "tolerance": 0,
-        "trigger_on_initial": false
-      },
-      "ocr": {
-        "psm": 7,
-        "scale": 3.0,
-        "threshold": "otsu",
-        "invert": false,
-        "whitelist": "0123456789",
-        "timeout_seconds": 2.0,
-        "number_index": 0,
-        "border": 10
-      },
-      "required_matches": 2,
-      "save_evidence": true
-    },
-    {
-      "name": "警告数値",
-      "detector": "number",
-      "action": "sound",
+      "sound_enabled": true,
       "sound": "sounds/alert.wav",
       "region": {
-        "left": 500,
-        "top": 250,
-        "width": 180,
-        "height": 60
+        "left": 2431,
+        "top": 1204,
+        "width": 155,
+        "height": 46
       },
+      "required_matches": 2,
+      "save_evidence": false,
       "condition": {
-        "operator": "ge",
-        "value": 100,
-        "tolerance": 0
+        "operator": "eq",
+        "value": 1234.0,
+        "tolerance": 0,
+        "trigger_on_initial": false
       },
       "ocr": {
         "psm": 7,
@@ -58,9 +34,7 @@
         "timeout_seconds": 2.0,
         "number_index": 0,
         "border": 10
-      },
-      "required_matches": 2,
-      "save_evidence": false
+      }
     }
   ]
 }
