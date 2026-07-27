@@ -1,0 +1,9 @@
+ScreenImageMonitor v1.0 パッチ
+
+v6.6.1へ上書きするファイル一式です。
+ZIPを展開し、フォルダー構成を保ったままGitHubリポジトリ直下へ上書きしてください。
+config.json、counts.json、templates、soundsは含まれていないため、既存設定を維持できます。
+
+上書き後:
+Actions > Build Windows Integrated GUI EXE > Run workflow
+Artifact: ScreenImageMonitor-Windows-GUI-v1.0

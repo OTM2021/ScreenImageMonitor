@@ -578,7 +578,7 @@ class SetupApp:
         self.on_saved = on_saved
         self.initial_rule_name = initial_rule_name
         self.auto_select_region = auto_select_region
-        self.root.title("ScreenImageMonitor GUI設定")
+        self.root.title("ScreenImageMonitor v1.0 GUI設定")
         self.root.geometry("1080x720")
         self.root.minsize(980, 650)
 

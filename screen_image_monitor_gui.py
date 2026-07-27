@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import queue
 import sys
@@ -27,6 +28,83 @@ from screen_setup_gui import (
 
 APP_DIR = engine.APP_DIR
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+
+COUNTER_DISPLAY_PATH = APP_DIR / "counter_display.json"
+COUNTER_BACKGROUND = "#3F80EC"
+COUNTER_FOREGROUND = "#FFFFFF"
+
+
+@dataclass(frozen=True)
+class CounterDisplaySettings:
+    font_family: str = "Segoe UI Light"
+    font_size: int = 56
+    font_weight: str = "normal"
+
+
+def load_counter_display_settings(
+    path: Path = COUNTER_DISPLAY_PATH,
+) -> CounterDisplaySettings:
+    default = CounterDisplaySettings()
+    if not path.exists():
+        return default
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+    if not isinstance(raw, dict):
+        return default
+
+    family = raw.get("font_family", default.font_family)
+    size = raw.get("font_size", default.font_size)
+    weight = raw.get("font_weight", default.font_weight)
+
+    if not isinstance(family, str) or not family.strip():
+        family = default.font_family
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        size = default.font_size
+    size = max(18, min(size, 180))
+    if weight not in {"normal", "bold"}:
+        weight = default.font_weight
+
+    return CounterDisplaySettings(
+        font_family=family.strip(),
+        font_size=size,
+        font_weight=weight,
+    )
+
+
+def save_counter_display_settings(
+    settings: CounterDisplaySettings,
+    path: Path = COUNTER_DISPLAY_PATH,
+) -> None:
+    payload = {
+        "font_family": settings.font_family,
+        "font_size": settings.font_size,
+        "font_weight": settings.font_weight,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def resolve_counter_font_family(widget: tk.Misc, requested: str) -> str:
+    try:
+        available = {str(name).casefold(): str(name) for name in tkfont.families(widget)}
+    except tk.TclError:
+        return requested
+    for candidate in (requested, "Segoe UI Light", "Segoe UI", "Arial"):
+        resolved = available.get(candidate.casefold())
+        if resolved:
+            return resolved
+    return requested
 
 
 @dataclass(frozen=True)
@@ -351,8 +429,195 @@ class MonitorWorker:
             self._put("stopped")
 
 
+class CounterFontDialog:
+    """Choose the font used for the large counter values."""
+
+    def __init__(
+        self,
+        parent: tk.Toplevel,
+        settings: CounterDisplaySettings,
+        on_apply: Callable[[CounterDisplaySettings], None],
+    ) -> None:
+        self.parent = parent
+        self.on_apply = on_apply
+        self.window = tk.Toplevel(parent)
+        self.window.title("カウンターのフォント設定")
+        self.window.resizable(False, False)
+        self.window.transient(parent)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+
+        families = sorted(
+            {
+                str(name)
+                for name in tkfont.families(self.window)
+                if str(name).strip() and not str(name).startswith("@")
+            },
+            key=str.casefold,
+        )
+        initial_family = resolve_counter_font_family(
+            self.window,
+            settings.font_family,
+        )
+        if initial_family not in families:
+            families.insert(0, initial_family)
+
+        self.family_var = tk.StringVar(value=initial_family)
+        self.size_var = tk.IntVar(value=settings.font_size)
+        self.bold_var = tk.BooleanVar(value=settings.font_weight == "bold")
+
+        outer = ttk.Frame(self.window, padding=16)
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.columnconfigure(1, weight=1)
+
+        ttk.Label(outer, text="フォント").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, 10),
+            pady=4,
+        )
+        self.family_box = ttk.Combobox(
+            outer,
+            textvariable=self.family_var,
+            values=families,
+            width=34,
+        )
+        self.family_box.grid(row=0, column=1, sticky="ew", pady=4)
+
+        ttk.Label(outer, text="文字サイズ").grid(
+            row=1,
+            column=0,
+            sticky="w",
+            padx=(0, 10),
+            pady=4,
+        )
+        self.size_spin = ttk.Spinbox(
+            outer,
+            from_=18,
+            to=180,
+            increment=1,
+            textvariable=self.size_var,
+            width=8,
+            command=self._refresh_preview,
+        )
+        self.size_spin.grid(row=1, column=1, sticky="w", pady=4)
+
+        ttk.Checkbutton(
+            outer,
+            text="太字にする",
+            variable=self.bold_var,
+            command=self._refresh_preview,
+        ).grid(row=2, column=1, sticky="w", pady=(4, 8))
+
+        ttk.Label(
+            outer,
+            text="Windowsにインストールされているフォントを使用します。",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        preview_frame = tk.Frame(
+            outer,
+            background=COUNTER_BACKGROUND,
+            width=390,
+            height=130,
+        )
+        preview_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        preview_frame.grid_propagate(False)
+        preview_frame.rowconfigure(0, weight=1)
+        preview_frame.columnconfigure(0, weight=1)
+        self.preview_label = tk.Label(
+            preview_frame,
+            text="1234",
+            foreground=COUNTER_FOREGROUND,
+            background=COUNTER_BACKGROUND,
+            anchor="center",
+        )
+        self.preview_label.grid(row=0, column=0, sticky="nsew")
+
+        buttons = ttk.Frame(outer)
+        buttons.grid(row=5, column=0, columnspan=2, sticky="ew")
+        ttk.Button(
+            buttons,
+            text="初期設定に戻す",
+            command=self._reset,
+        ).pack(side="left")
+        ttk.Button(
+            buttons,
+            text="キャンセル",
+            command=self.close,
+        ).pack(side="right")
+        ttk.Button(
+            buttons,
+            text="保存",
+            command=self._save,
+        ).pack(side="right", padx=(0, 8))
+
+        self.family_box.bind("<<ComboboxSelected>>", self._refresh_preview)
+        self.family_box.bind("<KeyRelease>", self._refresh_preview)
+        self.size_spin.bind("<KeyRelease>", self._refresh_preview)
+        self.window.bind("<Return>", lambda _event: self._save())
+        self.window.bind("<Escape>", lambda _event: self.close())
+
+        self._refresh_preview()
+        self.window.update_idletasks()
+        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - self.window.winfo_width()) // 2)
+        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - self.window.winfo_height()) // 2)
+        self.window.geometry(f"+{x}+{y}")
+        self.window.wait_visibility()
+        self.window.grab_set()
+        self.family_box.focus_set()
+
+    def _current_settings(self) -> CounterDisplaySettings:
+        family = self.family_var.get().strip() or CounterDisplaySettings().font_family
+        try:
+            size = int(self.size_var.get())
+        except (tk.TclError, ValueError):
+            size = CounterDisplaySettings().font_size
+        size = max(18, min(size, 180))
+        return CounterDisplaySettings(
+            font_family=family,
+            font_size=size,
+            font_weight="bold" if self.bold_var.get() else "normal",
+        )
+
+    def _refresh_preview(self, _event: tk.Event | None = None) -> None:
+        settings = self._current_settings()
+        family = resolve_counter_font_family(self.window, settings.font_family)
+        self.preview_label.configure(
+            font=(family, settings.font_size, settings.font_weight),
+        )
+
+    def _reset(self) -> None:
+        default = CounterDisplaySettings()
+        self.family_var.set(resolve_counter_font_family(self.window, default.font_family))
+        self.size_var.set(default.font_size)
+        self.bold_var.set(False)
+        self._refresh_preview()
+
+    def _save(self) -> None:
+        settings = self._current_settings()
+        try:
+            save_counter_display_settings(settings)
+        except OSError as error:
+            messagebox.showerror(
+                "フォント設定",
+                f"フォント設定を保存できませんでした。\n\n{error}",
+                parent=self.window,
+            )
+            return
+        self.on_apply(settings)
+        self.close()
+
+    def close(self) -> None:
+        try:
+            self.window.grab_release()
+        except tk.TclError:
+            pass
+        if self.window.winfo_exists():
+            self.window.destroy()
+
+
 class CounterWindow:
-    """Independent counter display window."""
+    """Independent, large-format counter display window."""
 
     def __init__(
         self,
@@ -365,54 +630,73 @@ class CounterWindow:
         self.clear_one_callback = clear_one
         self.clear_all_callback = clear_all
         self.on_close_callback = on_close
+        self.cards: dict[str, dict[str, tk.Widget]] = {}
+        self.settings = load_counter_display_settings()
+
         self.window = tk.Toplevel(parent)
         self.window.title("ScreenImageMonitor カウンター")
-        self.window.geometry("560x430")
-        self.window.minsize(430, 260)
+        self.window.geometry("580x620")
+        self.window.minsize(430, 300)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
+
+        self.counter_font = tkfont.Font(
+            self.window,
+            family=resolve_counter_font_family(
+                self.window,
+                self.settings.font_family,
+            ),
+            size=self.settings.font_size,
+            weight=self.settings.font_weight,
+        )
 
         outer = ttk.Frame(self.window, padding=12)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(1, weight=1)
 
+        header = ttk.Frame(outer)
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        header.columnconfigure(0, weight=1)
         ttk.Label(
-            outer,
+            header,
             text="カウンター",
             font=("Yu Gothic UI", 18, "bold"),
-        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            header,
+            text="フォント設定",
+            command=self.open_font_settings,
+        ).grid(row=0, column=1, sticky="e")
 
-        self.tree = ttk.Treeview(
+        self.canvas = tk.Canvas(
             outer,
-            columns=("count", "state"),
-            show="tree headings",
-            selectmode="browse",
-            style="Counter.Treeview",
+            highlightthickness=0,
+            borderwidth=0,
+            background="#F3F4F6",
         )
-        self.tree.heading("#0", text="ルール名")
-        self.tree.heading("count", text="回数")
-        self.tree.heading("state", text="状態")
-        self.tree.column("#0", width=300, minwidth=180)
-        self.tree.column("count", width=110, anchor="e", stretch=False)
-        self.tree.column("state", width=90, anchor="center", stretch=False)
-        self.tree.grid(row=1, column=0, sticky="nsew")
-
-        scroll = ttk.Scrollbar(outer, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
+        self.canvas.grid(row=1, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(outer, orient="vertical", command=self.canvas.yview)
         scroll.grid(row=1, column=1, sticky="ns")
+        self.canvas.configure(yscrollcommand=scroll.set)
+
+        self.card_container = tk.Frame(self.canvas, background="#F3F4F6")
+        self.canvas_window = self.canvas.create_window(
+            (0, 0),
+            window=self.card_container,
+            anchor="nw",
+        )
+        self.card_container.bind("<Configure>", self._update_scroll_region)
+        self.canvas.bind("<Configure>", self._resize_card_container)
+        self.canvas.bind("<Enter>", self._bind_mousewheel)
+        self.canvas.bind("<Leave>", self._unbind_mousewheel)
 
         buttons = ttk.Frame(outer)
         buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Button(
             buttons,
-            text="選択カウントをクリア",
-            command=self._clear_selected,
-        ).pack(side="left")
-        ttk.Button(
-            buttons,
             text="全カウントをクリア",
             command=self.clear_all_callback,
-        ).pack(side="left", padx=(8, 0))
+        ).pack(side="left")
         ttk.Button(buttons, text="閉じる", command=self.close).pack(side="right")
 
     @property
@@ -429,74 +713,141 @@ class CounterWindow:
             self.window.focus_force()
 
     def close(self) -> None:
+        self._unbind_mousewheel()
         if self.exists:
             self.window.destroy()
         self.on_close_callback()
 
-    def _clear_selected(self) -> None:
-        selection = self.tree.selection()
-        if not selection:
-            messagebox.showinfo(
-                "カウントクリア",
-                "クリアするカウントを選択してください。",
-                parent=self.window,
-            )
+    def _update_scroll_region(self, _event: tk.Event | None = None) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _resize_card_container(self, event: tk.Event) -> None:
+        self.canvas.itemconfigure(self.canvas_window, width=max(1, event.width))
+
+    def _bind_mousewheel(self, _event: tk.Event | None = None) -> None:
+        self.window.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _unbind_mousewheel(self, _event: tk.Event | None = None) -> None:
+        try:
+            self.window.unbind_all("<MouseWheel>")
+        except tk.TclError:
+            pass
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        self.canvas.yview_scroll(int(-event.delta / 120), "units")
+
+    def open_font_settings(self) -> None:
+        CounterFontDialog(
+            self.window,
+            self.settings,
+            self.apply_font_settings,
+        )
+
+    def apply_font_settings(self, settings: CounterDisplaySettings) -> None:
+        self.settings = settings
+        self.counter_font.configure(
+            family=resolve_counter_font_family(self.window, settings.font_family),
+            size=settings.font_size,
+            weight=settings.font_weight,
+        )
+        self._update_scroll_region()
+
+    def _create_card(self, name: str, count: int = 0, state: str = "停止") -> None:
+        if name in self.cards:
             return
-        self.clear_one_callback(selection[0])
+
+        card = tk.Frame(
+            self.card_container,
+            background=COUNTER_BACKGROUND,
+            padx=16,
+            pady=12,
+        )
+        card.pack(fill="x", padx=4, pady=(0, 10))
+        card.columnconfigure(0, weight=1)
+
+        name_label = tk.Label(
+            card,
+            text=name,
+            foreground=COUNTER_FOREGROUND,
+            background=COUNTER_BACKGROUND,
+            font=("Yu Gothic UI", 11, "bold"),
+            anchor="w",
+        )
+        name_label.grid(row=0, column=0, sticky="ew")
+
+        clear_button = tk.Button(
+            card,
+            text="0に戻す",
+            command=lambda rule_name=name: self.clear_one_callback(rule_name),
+            padx=10,
+            pady=2,
+        )
+        clear_button.grid(row=0, column=1, sticky="e")
+
+        count_label = tk.Label(
+            card,
+            text=str(count),
+            foreground=COUNTER_FOREGROUND,
+            background=COUNTER_BACKGROUND,
+            font=self.counter_font,
+            anchor="center",
+            padx=8,
+            pady=4,
+        )
+        count_label.grid(row=1, column=0, columnspan=2, sticky="nsew")
+
+        state_label = tk.Label(
+            card,
+            text=state,
+            foreground=COUNTER_FOREGROUND,
+            background=COUNTER_BACKGROUND,
+            font=("Yu Gothic UI", 10),
+            anchor="e",
+        )
+        state_label.grid(row=2, column=0, columnspan=2, sticky="e")
+
+        self.cards[name] = {
+            "frame": card,
+            "count": count_label,
+            "state": state_label,
+        }
 
     def set_rules(self, rules: list[engine.Rule], counts: dict[str, int]) -> None:
-        selected = self.tree.selection()
-        selected_name = selected[0] if selected else None
-        children = self.tree.get_children()
-        if children:
-            self.tree.delete(*children)
+        for card in self.cards.values():
+            card["frame"].destroy()
+        self.cards.clear()
 
         for rule in rules:
-            self.tree.insert(
-                "",
-                "end",
-                iid=rule.name,
-                text=rule.name,
-                values=(counts.get(rule.name, 0), "停止"),
+            self._create_card(
+                rule.name,
+                count=counts.get(rule.name, 0),
+                state="停止",
             )
-
-        if selected_name and self.tree.exists(selected_name):
-            self.tree.selection_set(selected_name)
+        self._update_scroll_region()
 
     def update_rows(self, rows: list[dict[str, Any]]) -> None:
         for row in rows:
             name = str(row["name"])
-            if not self.tree.exists(name):
-                self.tree.insert("", "end", iid=name, text=name)
-            self.tree.item(
-                name,
-                text=name,
-                values=(row.get("count", 0), "成立" if row.get("active") else "監視中"),
+            self._create_card(name)
+            self.cards[name]["count"].configure(text=str(row.get("count", 0)))
+            self.cards[name]["state"].configure(
+                text="成立" if row.get("active") else "監視中",
             )
 
     def update_counts(self, counts: dict[str, int]) -> None:
         for name, value in counts.items():
-            if not self.tree.exists(name):
-                continue
-            current = list(self.tree.item(name, "values"))
-            while len(current) < 2:
-                current.append("停止")
-            current[0] = value
-            self.tree.item(name, values=current)
+            self._create_card(name)
+            self.cards[name]["count"].configure(text=str(value))
 
     def set_stopped(self) -> None:
-        for name in self.tree.get_children():
-            current = list(self.tree.item(name, "values"))
-            while len(current) < 2:
-                current.append("")
-            current[1] = "停止"
-            self.tree.item(name, values=current)
+        for card in self.cards.values():
+            card["state"].configure(text="停止")
 
 
 class MainApplication:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("ScreenImageMonitor")
+        self.root.title("ScreenImageMonitor v1.0")
         self.root.geometry("1120x760")
         self.root.minsize(920, 620)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -538,21 +889,6 @@ class MainApplication:
             font=monitor_heading_font,
         )
 
-        counter_font = tkfont.Font(
-            self.root,
-            family="Yu Gothic UI",
-            size=15,
-            weight="bold",
-        )
-        style.configure(
-            "Counter.Treeview",
-            font=counter_font,
-            rowheight=counter_font.metrics("linespace") + 14,
-        )
-        style.configure(
-            "Counter.Treeview.Heading",
-            font=("Yu Gothic UI", 11, "bold"),
-        )
 
         header = ttk.Frame(self.root, padding=(12, 10))
         header.pack(fill="x")
