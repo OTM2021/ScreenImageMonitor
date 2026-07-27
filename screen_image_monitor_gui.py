@@ -8,12 +8,13 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import mss
 import numpy as np
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import messagebox, ttk
 
 import screen_image_monitor as engine
@@ -21,6 +22,7 @@ from screen_setup_gui import open_setup_window, set_dpi_awareness
 
 
 APP_DIR = engine.APP_DIR
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
 
 @dataclass(frozen=True)
@@ -80,10 +82,7 @@ class MonitorWorker:
                 engine.clear_counts(config, states, rule_name=value)
                 self._put(
                     "counts",
-                    {
-                        name: state.count
-                        for name, state in states.items()
-                    },
+                    {name: state.count for name, state in states.items()},
                 )
 
     def _run(self) -> None:
@@ -213,6 +212,152 @@ class MonitorWorker:
             self._put("stopped")
 
 
+class CounterWindow:
+    """Independent counter display window."""
+
+    def __init__(
+        self,
+        parent: tk.Tk,
+        clear_one: Callable[[str], None],
+        clear_all: Callable[[], None],
+        on_close: Callable[[], None],
+    ) -> None:
+        self.parent = parent
+        self.clear_one_callback = clear_one
+        self.clear_all_callback = clear_all
+        self.on_close_callback = on_close
+        self.window = tk.Toplevel(parent)
+        self.window.title("ScreenImageMonitor カウンター")
+        self.window.geometry("560x430")
+        self.window.minsize(430, 260)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+
+        outer = ttk.Frame(self.window, padding=12)
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            outer,
+            text="カウンター",
+            font=("Yu Gothic UI", 18, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+        self.tree = ttk.Treeview(
+            outer,
+            columns=("count", "state"),
+            show="tree headings",
+            selectmode="browse",
+            style="Counter.Treeview",
+        )
+        self.tree.heading("#0", text="ルール名")
+        self.tree.heading("count", text="回数")
+        self.tree.heading("state", text="状態")
+        self.tree.column("#0", width=300, minwidth=180)
+        self.tree.column("count", width=110, anchor="e", stretch=False)
+        self.tree.column("state", width=90, anchor="center", stretch=False)
+        self.tree.grid(row=1, column=0, sticky="nsew")
+
+        scroll = ttk.Scrollbar(outer, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=1, column=1, sticky="ns")
+
+        buttons = ttk.Frame(outer)
+        buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(
+            buttons,
+            text="選択カウントをクリア",
+            command=self._clear_selected,
+        ).pack(side="left")
+        ttk.Button(
+            buttons,
+            text="全カウントをクリア",
+            command=self.clear_all_callback,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="閉じる", command=self.close).pack(side="right")
+
+    @property
+    def exists(self) -> bool:
+        try:
+            return bool(self.window.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def focus(self) -> None:
+        if self.exists:
+            self.window.deiconify()
+            self.window.lift()
+            self.window.focus_force()
+
+    def close(self) -> None:
+        if self.exists:
+            self.window.destroy()
+        self.on_close_callback()
+
+    def _clear_selected(self) -> None:
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo(
+                "カウントクリア",
+                "クリアするカウントを選択してください。",
+                parent=self.window,
+            )
+            return
+        self.clear_one_callback(selection[0])
+
+    def set_rules(self, rules: list[engine.Rule], counts: dict[str, int]) -> None:
+        selected = self.tree.selection()
+        selected_name = selected[0] if selected else None
+        children = self.tree.get_children()
+        if children:
+            self.tree.delete(*children)
+
+        for rule in rules:
+            if rule.action != "count":
+                continue
+            self.tree.insert(
+                "",
+                "end",
+                iid=rule.name,
+                text=rule.name,
+                values=(counts.get(rule.name, 0), "停止"),
+            )
+
+        if selected_name and self.tree.exists(selected_name):
+            self.tree.selection_set(selected_name)
+
+    def update_rows(self, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            if row.get("action") != "count":
+                continue
+            name = str(row["name"])
+            if not self.tree.exists(name):
+                self.tree.insert("", "end", iid=name, text=name)
+            self.tree.item(
+                name,
+                text=name,
+                values=(row.get("count", 0), "成立" if row.get("active") else "監視中"),
+            )
+
+    def update_counts(self, counts: dict[str, int]) -> None:
+        for name, value in counts.items():
+            if not self.tree.exists(name):
+                continue
+            current = list(self.tree.item(name, "values"))
+            while len(current) < 2:
+                current.append("停止")
+            current[0] = value
+            self.tree.item(name, values=current)
+
+    def set_stopped(self) -> None:
+        for name in self.tree.get_children():
+            current = list(self.tree.item(name, "values"))
+            while len(current) < 2:
+                current.append("")
+            current[1] = "停止"
+            self.tree.item(name, values=current)
+
+
 class MainApplication:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -224,7 +369,8 @@ class MainApplication:
         self.events: queue.Queue[WorkerEvent] = queue.Queue()
         self.worker = MonitorWorker(self.events)
         self.closing = False
-        self._setup_pending = False
+        self.pending_settings: tuple[str | None, bool] | None = None
+        self.counter_window: CounterWindow | None = None
 
         self.status_var = tk.StringVar(value="停止中")
         self.summary_var = tk.StringVar(value="設定を読み込んでいます。")
@@ -232,11 +378,46 @@ class MainApplication:
         self._build_ui()
         self.reload_configuration()
         self.root.after(100, self._poll_events)
+        self.root.after(300, self.show_counter_window)
 
     def _build_ui(self) -> None:
         style = ttk.Style(self.root)
         if "vista" in style.theme_names():
             style.theme_use("vista")
+
+        monitor_font = tkfont.Font(self.root, family="Yu Gothic UI", size=10)
+        monitor_heading_font = tkfont.Font(
+            self.root,
+            family="Yu Gothic UI",
+            size=10,
+            weight="bold",
+        )
+        row_height = monitor_font.metrics("linespace") + 12
+        style.configure(
+            "Monitor.Treeview",
+            font=monitor_font,
+            rowheight=row_height,
+        )
+        style.configure(
+            "Monitor.Treeview.Heading",
+            font=monitor_heading_font,
+        )
+
+        counter_font = tkfont.Font(
+            self.root,
+            family="Yu Gothic UI",
+            size=15,
+            weight="bold",
+        )
+        style.configure(
+            "Counter.Treeview",
+            font=counter_font,
+            rowheight=counter_font.metrics("linespace") + 14,
+        )
+        style.configure(
+            "Counter.Treeview.Heading",
+            font=("Yu Gothic UI", 11, "bold"),
+        )
 
         header = ttk.Frame(self.root, padding=(12, 10))
         header.pack(fill="x")
@@ -275,10 +456,16 @@ class MainApplication:
 
         self.setup_button = ttk.Button(
             toolbar,
-            text="設定・領域選択",
+            text="設定",
             command=self.open_settings,
         )
         self.setup_button.pack(side="left", padx=(18, 0))
+
+        ttk.Button(
+            toolbar,
+            text="選択ルールの監視範囲を指定",
+            command=self.select_monitoring_region,
+        ).pack(side="left", padx=(8, 0))
 
         ttk.Button(
             toolbar,
@@ -286,21 +473,11 @@ class MainApplication:
             command=self.reload_configuration,
         ).pack(side="left", padx=(8, 0))
 
-        ttk.Separator(toolbar, orient="vertical").pack(
-            side="left", fill="y", padx=14
-        )
-
         ttk.Button(
             toolbar,
-            text="選択カウントをクリア",
-            command=self.clear_selected_count,
-        ).pack(side="left")
-
-        ttk.Button(
-            toolbar,
-            text="全カウントをクリア",
-            command=self.clear_all_counts,
-        ).pack(side="left", padx=(8, 0))
+            text="カウンター表示",
+            command=self.show_counter_window,
+        ).pack(side="left", padx=(18, 0))
 
         ttk.Button(
             toolbar,
@@ -318,7 +495,6 @@ class MainApplication:
             "action",
             "metric",
             "state",
-            "count",
             "ocr",
         )
         self.tree = ttk.Treeview(
@@ -326,22 +502,21 @@ class MainApplication:
             columns=columns,
             show="tree headings",
             selectmode="browse",
+            style="Monitor.Treeview",
         )
         self.tree.heading("#0", text="ルール名")
         self.tree.heading("detector", text="判定")
         self.tree.heading("action", text="動作")
         self.tree.heading("metric", text="現在値／一致率")
         self.tree.heading("state", text="状態")
-        self.tree.heading("count", text="カウント")
         self.tree.heading("ocr", text="OCR生データ")
 
-        self.tree.column("#0", width=210, minwidth=150)
-        self.tree.column("detector", width=90, anchor="center")
-        self.tree.column("action", width=90, anchor="center")
-        self.tree.column("metric", width=120, anchor="center")
-        self.tree.column("state", width=90, anchor="center")
-        self.tree.column("count", width=90, anchor="e")
-        self.tree.column("ocr", width=260)
+        self.tree.column("#0", width=230, minwidth=150)
+        self.tree.column("detector", width=100, anchor="center")
+        self.tree.column("action", width=100, anchor="center")
+        self.tree.column("metric", width=140, anchor="center")
+        self.tree.column("state", width=100, anchor="center")
+        self.tree.column("ocr", width=330)
 
         scrollbar = ttk.Scrollbar(
             summary,
@@ -391,7 +566,6 @@ class MainApplication:
         self.log_text.configure(state="normal")
         self.log_text.insert("end", line.rstrip() + "\n")
         self.log_text.see("end")
-        # Keep the GUI responsive during long-running use.
         line_count = int(self.log_text.index("end-1c").split(".")[0])
         if line_count > 3000:
             self.log_text.delete("1.0", "500.0")
@@ -401,6 +575,13 @@ class MainApplication:
         self.start_button.configure(state="disabled" if running else "normal")
         self.stop_button.configure(state="normal" if running else "disabled")
         self.status_var.set("監視中" if running else "停止中")
+        if not running and self.counter_window is not None:
+            self.counter_window.set_stopped()
+
+    def _load_config_and_counts(self) -> tuple[engine.AppConfig, dict[str, int]]:
+        config = engine.load_config()
+        counts = engine.load_counts(config.count_file)
+        return config, counts
 
     def reload_configuration(self) -> None:
         if self.worker.running:
@@ -412,8 +593,7 @@ class MainApplication:
             return
 
         try:
-            config = engine.load_config()
-            counts = engine.load_counts(config.count_file)
+            config, counts = self._load_config_and_counts()
         except Exception as error:
             children = self.tree.get_children()
             if children:
@@ -442,7 +622,6 @@ class MainApplication:
                     "カウント" if rule.action == "count" else "音通知",
                     "---",
                     "停止",
-                    counts.get(rule.name, 0) if rule.action == "count" else "-",
                     "",
                 ),
             )
@@ -453,18 +632,59 @@ class MainApplication:
         self.summary_var.set(
             f"ルール {len(config.rules)}件／カウント対象 {count_rules}件"
         )
+        if self.counter_window is not None and self.counter_window.exists:
+            self.counter_window.set_rules(config.rules, counts)
+
+    def _missing_template_rules(self, config: engine.AppConfig) -> list[str]:
+        missing: list[str] = []
+        for rule in config.rules:
+            if rule.detector != "template":
+                continue
+            path = rule.template_path
+            if (
+                path is None
+                or path.suffix.lower() not in IMAGE_EXTENSIONS
+                or not path.is_file()
+            ):
+                missing.append(rule.name)
+        return missing
 
     def start_monitoring(self) -> None:
         if self.worker.running:
             return
         try:
-            engine.load_config()
+            config = engine.load_config()
         except Exception as error:
-            messagebox.showerror(
-                "監視開始",
-                f"設定を読み込めません。\n\n{error}",
+            message = str(error)
+            if "template" in message.lower() or "png/jpeg" in message.lower():
+                open_now = messagebox.askyesno(
+                    "画像が未登録です",
+                    f"画像識別ルールの登録内容に問題があります。\n\n{message}\n\n"
+                    "設定画面を開いてPNG/JPEGを登録しますか？",
+                    parent=self.root,
+                )
+                if open_now:
+                    self._show_settings(None, auto_select_region=False)
+            else:
+                messagebox.showerror(
+                    "監視開始",
+                    f"設定を読み込めません。\n\n{error}",
+                    parent=self.root,
+                )
+            return
+
+        missing = self._missing_template_rules(config)
+        if missing:
+            first = missing[0]
+            names = "\n".join(f"・{name}" for name in missing)
+            open_now = messagebox.askyesno(
+                "画像が未登録です",
+                "次の画像識別ルールにPNG/JPEGが登録されていません。\n\n"
+                f"{names}\n\n設定画面を開いて登録しますか？",
                 parent=self.root,
             )
+            if open_now:
+                self._show_settings(first, auto_select_region=False)
             return
 
         self._set_running_ui(True)
@@ -492,32 +712,26 @@ class MainApplication:
         except Exception as error:
             messagebox.showerror("カウントクリア", str(error), parent=self.root)
 
-    def clear_selected_count(self) -> None:
-        selection = self.tree.selection()
-        if not selection:
-            messagebox.showinfo(
-                "カウントクリア",
-                "カウント対象のルールを選択してください。",
-                parent=self.root,
-            )
+    def clear_count_by_name(self, rule_name: str) -> None:
+        try:
+            config = engine.load_config()
+            target = next((rule for rule in config.rules if rule.name == rule_name), None)
+        except Exception as error:
+            messagebox.showerror("カウントクリア", str(error), parent=self.root)
             return
-        rule_name = selection[0]
-        values = self.tree.item(rule_name, "values")
-        if len(values) < 2 or values[1] != "カウント":
+        if target is None or target.action != "count":
             messagebox.showinfo(
                 "カウントクリア",
                 "選択ルールはカウント対象ではありません。",
                 parent=self.root,
             )
             return
-
         if not messagebox.askyesno(
             "カウントクリア",
             f"「{rule_name}」のカウントを0にしますか？",
-            parent=self.root,
+            parent=self.counter_window.window if self.counter_window else self.root,
         ):
             return
-
         if self.worker.running:
             self.worker.request_clear(rule_name)
         else:
@@ -527,36 +741,83 @@ class MainApplication:
         if not messagebox.askyesno(
             "全カウントクリア",
             "すべてのカウントを0にしますか？",
-            parent=self.root,
+            parent=self.counter_window.window if self.counter_window else self.root,
         ):
             return
-
         if self.worker.running:
             self.worker.request_clear(None)
         else:
             self._clear_when_stopped(None)
 
+    def _selected_rule_name(self) -> str | None:
+        selection = self.tree.selection()
+        if not selection:
+            return None
+        return selection[0]
+
     def open_settings(self) -> None:
+        self._request_settings(None, auto_select_region=False)
+
+    def select_monitoring_region(self) -> None:
+        rule_name = self._selected_rule_name()
+        if not rule_name:
+            messagebox.showinfo(
+                "監視範囲",
+                "監視一覧から対象ルールを選択してください。",
+                parent=self.root,
+            )
+            return
+        self._request_settings(rule_name, auto_select_region=True)
+
+    def _request_settings(
+        self,
+        rule_name: str | None,
+        auto_select_region: bool,
+    ) -> None:
         if self.worker.running:
-            self._setup_pending = True
+            self.pending_settings = (rule_name, auto_select_region)
             self.stop_monitoring()
             return
-        self._show_settings()
+        self._show_settings(rule_name, auto_select_region)
 
-    def _show_settings(self) -> None:
+    def _show_settings(
+        self,
+        rule_name: str | None = None,
+        auto_select_region: bool = False,
+    ) -> None:
         try:
             open_setup_window(
                 self.root,
                 engine.CONFIG_PATH,
                 on_saved=self._settings_saved,
+                initial_rule_name=rule_name,
+                auto_select_region=auto_select_region,
             )
         except Exception:
-            # The setup window already displays the detailed error.
             return
         self.reload_configuration()
 
     def _settings_saved(self) -> None:
         self._append_log("設定を保存しました。")
+
+    def show_counter_window(self) -> None:
+        if self.counter_window is not None and self.counter_window.exists:
+            self.counter_window.focus()
+            return
+        self.counter_window = CounterWindow(
+            self.root,
+            clear_one=self.clear_count_by_name,
+            clear_all=self.clear_all_counts,
+            on_close=self._counter_closed,
+        )
+        try:
+            config, counts = self._load_config_and_counts()
+            self.counter_window.set_rules(config.rules, counts)
+        except Exception as error:
+            self._append_log(f"カウンター表示エラー: {error}")
+
+    def _counter_closed(self) -> None:
+        self.counter_window = None
 
     def open_evidence_folder(self) -> None:
         try:
@@ -579,7 +840,6 @@ class MainApplication:
             messagebox.showerror("証跡画像", str(error), parent=self.root)
 
     def _update_status_rows(self, rows: list[dict[str, Any]]) -> None:
-        total_count = 0
         active_count = 0
         for row in rows:
             name = str(row["name"])
@@ -588,9 +848,6 @@ class MainApplication:
             detector = "数字OCR" if row["detector"] == "number" else "画像一致"
             action = "カウント" if row["action"] == "count" else "音通知"
             state = "成立" if row["active"] else "監視中"
-            count_value: int | str = row["count"] if row["action"] == "count" else "-"
-            if isinstance(count_value, int):
-                total_count += count_value
             if row["active"]:
                 active_count += 1
             self.tree.item(
@@ -601,23 +858,18 @@ class MainApplication:
                     action,
                     row["metric"],
                     state,
-                    count_value,
                     str(row.get("ocr_text", ""))[:80],
                 ),
             )
         self.summary_var.set(
-            f"監視ルール {len(rows)}件／条件成立 {active_count}件／合計カウント {total_count}"
+            f"監視ルール {len(rows)}件／条件成立 {active_count}件"
         )
+        if self.counter_window is not None and self.counter_window.exists:
+            self.counter_window.update_rows(rows)
 
     def _update_counts(self, counts: dict[str, int]) -> None:
-        for name, value in counts.items():
-            if not self.tree.exists(name):
-                continue
-            current = list(self.tree.item(name, "values"))
-            while len(current) < 6:
-                current.append("")
-            current[4] = value
-            self.tree.item(name, values=current)
+        if self.counter_window is not None and self.counter_window.exists:
+            self.counter_window.update_counts(counts)
 
     def _poll_events(self) -> None:
         try:
@@ -643,9 +895,13 @@ class MainApplication:
                 elif event.kind == "stopped":
                     self._set_running_ui(False)
                     self.reload_configuration()
-                    if self._setup_pending:
-                        self._setup_pending = False
-                        self.root.after(50, self._show_settings)
+                    if self.pending_settings is not None:
+                        rule_name, auto_select = self.pending_settings
+                        self.pending_settings = None
+                        self.root.after(
+                            50,
+                            lambda n=rule_name, a=auto_select: self._show_settings(n, a),
+                        )
                     if self.closing:
                         self.root.destroy()
                         return

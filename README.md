@@ -1,190 +1,87 @@
-# ScreenImageMonitor 統合GUI OCR版 v3
+# ScreenImageMonitor 統合GUI版 v4
 
+Windows画面の指定範囲を監視し、数字OCRまたは登録画像との一致でカウントアップ／音通知を行うGUIアプリです。操作は `ScreenImageMonitor.exe` だけで完結し、BATファイルは使用しません。
 
-- Tesseract OCR本体と英語数字認識データを`ScreenImageMonitor.exe`内部へ同梱します。
-- 配布先に`tesseract`フォルダーを置く必要はありません。
-- GitHub Actionsは統合GUIの`screen_image_monitor_gui.py`をビルドします。
-- `--windowed`実行時に標準入力を使用しないため、`input(): lost sys.stdin`は発生しません。
+## v4の主な変更
 
-# ScreenImageMonitor GUI / OCR版
+- カウンターをメイン画面から分離し、専用ポップアップで表示
+- メイン画面の「カウンター表示」から再表示可能
+- カウンターポップアップで個別クリア／全クリアが可能
+- 監視一覧の文字サイズと行高を同じフォント基準で調整
+- メイン画面でルールを選び「選択ルールの監視範囲を指定」を押すと、GUIのドラッグ選択を直接開始
+- 画像識別はPNG／JPG／JPEGの事前登録を必須化
+- 画像未登録時は、ルール作成時・保存時・監視開始時に登録を案内
+- 現在画面のキャプチャはプレビュー確認用であり、照合画像には自動登録しない
+- Tesseract OCRと英語学習データを単一EXEへ内包
 
-Windows画面の指定領域を監視し、画像一致または数字OCRの条件に応じて音通知・カウントアップを行います。
+## 基本操作
 
-## 主な機能
+1. `ScreenImageMonitor.exe`を起動します。
+2. メイン画面の「設定」を開き、ルールを追加します。
+3. 対象モニターを選び、「画面からドラッグ選択」で監視範囲を指定します。
+4. 数字OCRルールはOCR条件を設定します。
+5. 画像識別ルールは「PNG/JPEGを登録...」から照合画像を登録します。
+6. 「ルールへ反映」後、「config.jsonへ保存」を押します。
+7. メイン画面で「監視開始」を押します。
 
-- GUIでモニターを選択し、スクリーンショット上をドラッグして監視領域を指定
-- 数字OCRルールと画像一致ルールをGUIから追加
-- 選択領域をその場でスクリーンショット保存
-  - 数字OCR: `samples/<ルール名>.png`
-  - 画像一致: `templates/<ルール名>.png`
-- 取り込んだ画面でOCR結果または画像一致率をテスト
-- カウント値をGUIで確認・クリア
-- 条件成立時の証跡スクリーンショットを`evidence/<ルール名>/`へ保存
-- 音通知とカウントアップをルールごとに分離
-- 複数モニターと負の画面座標に対応
+## 監視範囲をメイン画面から指定
 
-## GitHub ActionsでEXEを作成
-
-1. ZIPの内容をGitHubリポジトリ直下へ配置します。
-2. GitHubの`Actions`を開きます。
-3. `Build Windows GUI OCR EXE`を選択します。
-4. `Run workflow`を実行します。
-5. 完了後、Artifactの`ScreenImageMonitor-GUI-Windows`をダウンロードします。
-
-ビルドは`windows-latest`上で実行され、PyInstallerの単一EXE形式で生成されます。Tesseract OCR本体も配布フォルダーへ同梱されます。
-
-## 初期設定
-
-配布ZIPを展開し、次をダブルクリックします。
+メイン画面の監視一覧から対象ルールを選び、次を押します。
 
 ```text
-OpenSetup.bat
+選択ルールの監視範囲を指定
 ```
 
-GUIでは次の順で設定します。
+監視中の場合は自動停止後、設定画面とドラッグ選択画面が開きます。
 
-1. 左側で既存ルールを選ぶか、新しいルールを追加
-2. 対象モニターを選択
-3. `画面からドラッグ選択`を押す
-4. 表示されたスクリーンショット上で対象範囲をドラッグ
-5. Enterで確定
-6. `現在の選択領域を取り込む`を押す
-7. `OCR／画像一致テスト`で確認
-8. `ルールへ反映`
-9. `config.jsonへ保存`
+## 画像識別ルール
 
-選択画面ではEscで取り消せます。
-
-## ルールの種類
-
-### 数字OCR＋カウント
-
-画面に表示された数字が増加・減少・変化した場合や、指定値の条件を満たした場合にカウントアップします。
-
-利用可能な条件:
+照合画像は次の形式に対応します。
 
 ```text
-eq        指定値と一致
-ne        指定値と不一致
-gt        指定値より大きい
-ge        指定値以上
-lt        指定値より小さい
-le        指定値以下
-between   指定範囲内
-changed   前回値から変化
-increase  前回値から増加
-decrease  前回値から減少
+.png
+.jpg
+.jpeg
 ```
 
-### 数字OCR＋音通知
+登録した画像はアプリと同じ場所の `templates` フォルダーへコピーされます。登録元ファイルを移動または削除しても、コピー済み画像を使用します。
 
-数字が指定値以上などの条件を満たした際に音を鳴らします。同じ条件が継続している間は1回だけ動作し、条件解除後に再成立すると再度鳴ります。
+画像が未登録・削除済み・未対応形式の場合、設定保存または監視開始を続行せず、登録を促します。
 
-### 画像一致＋カウント
+## カウンターポップアップ
 
-GUIで選択した領域をテンプレート画像として保存し、現在画面がテンプレートと一致した際にカウントアップします。
+EXE起動時にカウンター専用ウィンドウが開きます。閉じた場合は、メイン画面の「カウンター表示」で再表示できます。
 
-### 画像一致＋音通知
+カウント値は `counts.json` に保存され、アプリを終了しても維持されます。
 
-GUIで取り込んだ画像と画面が一致した際に音を鳴らします。
+## GitHub ActionsでEXEを作る
 
-## 監視開始
+GitHubリポジトリ直下へファイル一式を登録し、次を実行します。
 
 ```text
-StartMonitor.bat
+Actions
+→ Build Windows Integrated GUI EXE
+→ Run workflow
 ```
 
-または直接実行します。
+成功後、実行結果画面のArtifactsから次を取得します。
 
-```bat
+```text
+ScreenImageMonitor-Windows-GUI-v4
+```
+
+Artifactを展開し、`ScreenImageMonitor.exe`を起動してください。
+
+## 配布構成
+
+```text
 ScreenImageMonitor.exe
+config.json
+README.md
+templates/
+samples/
+sounds/
+evidence/
 ```
 
-監視中のキー操作:
-
-```text
-C       全カウントをクリア
-Q       終了
-Esc     終了
-```
-
-## カウントの確認とクリア
-
-GUI設定画面では、選択したカウントルールの現在値を表示します。`このカウントをクリア`で選択ルールだけを0にできます。
-
-全カウントクリア:
-
-```bat
-ClearCounts.bat
-```
-
-```bat
-ScreenImageMonitor.exe --clear-counts
-```
-
-個別クリア:
-
-```bat
-ScreenImageMonitor.exe --clear-count "数値増加回数"
-```
-
-## スクリーンショット保存先
-
-### 設定時のOCR確認画像
-
-```text
-samples/<ルール名>.png
-```
-
-### 画像一致用テンプレート
-
-```text
-templates/<ルール名>.png
-```
-
-### 動作時の証跡画像
-
-```text
-evidence/<ルール名>/YYYYMMDD_HHMMSS_count000001_value123.png
-```
-
-GUIの`動作時に証跡スクリーンショットを保存する`でルール単位に有効・無効を切り替えられます。
-
-## OCR精度調整
-
-GUIで領域をできるだけ数字だけに絞ってください。背景や単位記号を含めすぎると認識率が下がります。
-
-必要に応じて`config.json`のOCR設定を調整できます。
-
-```json
-"ocr": {
-  "psm": 7,
-  "scale": 3.0,
-  "threshold": "otsu",
-  "invert": false,
-  "whitelist": "0123456789.-",
-  "timeout_seconds": 2.0,
-  "number_index": 0,
-  "border": 10
-}
-```
-
-- `scale`: 小さい数字は3～5程度
-- `threshold`: `otsu`、`adaptive`、`none`
-- `invert`: 黒背景の白文字などで必要に応じて切替
-- `psm`: 一列の数字は7、1文字だけなら10
-- `whitelist`: 認識を許可する文字
-
-## 注意事項
-
-- Windowsの表示倍率変更後やモニター配置変更後はGUIで領域を再選択してください。
-- 対象ウィンドウが最小化されている場合や、他のウィンドウに隠れている場合は、画面上に見えている内容を取得します。
-- 画像一致ではアニメーション、時刻、カーソルなど変化する部分をテンプレートに含めないでください。
-
-
-## v3修正
-
-- OCR実行時の `--tessdata-dir` 引数を削除しました。
-- Tesseractの言語データは `TESSDATA_PREFIX` だけで指定します。
-- Windowsパスに引用符が混入し、`".../tessdata"/eng.traineddata` を探す問題を修正しました。
-- GitHub ActionsにOCRスモークテストを追加しました。
+TesseractはEXE内部へ同梱されるため、外部の`tesseract`フォルダーは不要です。

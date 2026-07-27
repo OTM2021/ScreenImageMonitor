@@ -448,7 +448,14 @@ def load_config() -> AppConfig:
         if detector == "template":
             template_value = item.get("template")
             if not isinstance(template_value, str) or not template_value.strip():
-                raise ValueError(f"Rule '{name}': 'template' is required.")
+                raise ValueError(
+                    f"Rule '{name}': PNG/JPEG template image is not registered."
+                )
+            template_suffix = Path(template_value.strip()).suffix.lower()
+            if template_suffix not in {".png", ".jpg", ".jpeg"}:
+                raise ValueError(
+                    f"Rule '{name}': template image must be PNG, JPG, or JPEG."
+                )
 
             match_threshold = require_number(
                 item,
