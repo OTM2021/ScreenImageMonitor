@@ -361,20 +361,26 @@ class SetupApp:
 
         self.options_frame = ttk.LabelFrame(right, text="判定条件", padding=8)
         self.options_frame.grid(row=6, column=0, columnspan=2, sticky="ew", pady=8)
-        self.options_frame.columnconfigure(1, weight=1)
+        self.options_frame.columnconfigure(0, weight=1)
 
-        ttk.Label(self.options_frame, text="条件").grid(row=0, column=0, sticky="w", pady=3)
+        # 数字OCRと画像一致の設定欄は完全に分離する。
+        # 画像ルールでOCR条件が表示されると、OCRが実行されるように見えるため。
+        self.number_options_frame = ttk.Frame(self.options_frame)
+        self.number_options_frame.grid(row=0, column=0, sticky="ew")
+        self.number_options_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(self.number_options_frame, text="数値条件").grid(row=0, column=0, sticky="w", pady=3)
         self.operator_var = tk.StringVar(value="increase")
         self.operator_combo = ttk.Combobox(
-            self.options_frame,
+            self.number_options_frame,
             textvariable=self.operator_var,
             state="readonly",
             values=("eq", "ne", "gt", "ge", "lt", "le", "between", "changed", "increase", "decrease"),
         )
         self.operator_combo.grid(row=0, column=1, sticky="ew", pady=3)
 
-        ttk.Label(self.options_frame, text="値 / 範囲").grid(row=1, column=0, sticky="w", pady=3)
-        value_frame = ttk.Frame(self.options_frame)
+        ttk.Label(self.number_options_frame, text="値 / 範囲").grid(row=1, column=0, sticky="w", pady=3)
+        value_frame = ttk.Frame(self.number_options_frame)
         value_frame.grid(row=1, column=1, sticky="ew", pady=3)
         self.value_var = tk.StringVar(value="0")
         self.minimum_var = tk.StringVar(value="0")
@@ -385,25 +391,38 @@ class SetupApp:
         ttk.Label(value_frame, text="  最大").pack(side="left")
         ttk.Entry(value_frame, textvariable=self.maximum_var, width=10).pack(side="left")
 
-        ttk.Label(self.options_frame, text="画像一致率").grid(row=2, column=0, sticky="w", pady=3)
-        self.threshold_var = tk.StringVar(value="0.90")
-        ttk.Entry(self.options_frame, textvariable=self.threshold_var).grid(row=2, column=1, sticky="ew", pady=3)
+        self.image_options_frame = ttk.Frame(self.options_frame)
+        self.image_options_frame.grid(row=0, column=0, sticky="ew")
+        self.image_options_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(self.options_frame, text="連続一致回数").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Label(self.image_options_frame, text="画像一致率").grid(row=0, column=0, sticky="w", pady=3)
+        self.threshold_var = tk.StringVar(value="0.90")
+        ttk.Entry(self.image_options_frame, textvariable=self.threshold_var).grid(row=0, column=1, sticky="ew", pady=3)
+        ttk.Label(
+            self.image_options_frame,
+            text="登録したPNG/JPEGとの画像一致だけを判定します。数字OCRは実行しません。",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 0))
+
+        common_options_frame = ttk.Frame(self.options_frame)
+        common_options_frame.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        common_options_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(common_options_frame, text="連続一致回数").grid(row=0, column=0, sticky="w", pady=3)
         self.required_var = tk.StringVar(value="2")
-        ttk.Entry(self.options_frame, textvariable=self.required_var).grid(row=3, column=1, sticky="ew", pady=3)
+        ttk.Entry(common_options_frame, textvariable=self.required_var).grid(row=0, column=1, sticky="ew", pady=3)
 
         self.evidence_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            self.options_frame,
+            common_options_frame,
             text="動作時に証跡スクリーンショットを保存する",
             variable=self.evidence_var,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=3)
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=3)
 
         action_frame = ttk.Frame(right)
         action_frame.grid(row=7, column=0, columnspan=2, sticky="ew", pady=4)
         ttk.Button(action_frame, text="現在の監視領域をプレビュー保存", command=self._capture_sample).pack(side="left")
-        ttk.Button(action_frame, text="OCR／画像一致テスト", command=self._test_current).pack(side="left", padx=8)
+        self.test_button = ttk.Button(action_frame, text="判定テスト", command=self._test_current)
+        self.test_button.pack(side="left", padx=8)
         ttk.Button(action_frame, text="ルールへ反映", command=self._apply_fields).pack(side="left", padx=8)
 
         ttk.Label(right, text="プレビュー画像／テスト結果").grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 4))
@@ -492,6 +511,10 @@ class SetupApp:
         if detector == "template":
             self.template_label.grid()
             self.template_frame.grid()
+            self.number_options_frame.grid_remove()
+            self.image_options_frame.grid()
+            self.options_frame.configure(text="画像一致判定条件")
+            self.test_button.configure(text="画像一致テスト")
             value = str(rule.get("template", "")).strip()
             self.template_var.set(value or "未登録")
             path = self._resolve_template_path(value)
@@ -507,6 +530,10 @@ class SetupApp:
             self.template_label.grid_remove()
             self.template_frame.grid_remove()
             self.template_var.set("対象外")
+            self.image_options_frame.grid_remove()
+            self.number_options_frame.grid()
+            self.options_frame.configure(text="数字OCR判定条件")
+            self.test_button.configure(text="数字OCRテスト")
 
     def _update_region_text(self) -> None:
         if not self.region_value:

@@ -1,8 +1,14 @@
-# ScreenImageMonitor 統合GUI版 v4
+# ScreenImageMonitor 統合GUI版 v5
 
 Windows画面の指定範囲を監視し、数字OCRまたは登録画像との一致でカウントアップ／音通知を行うGUIアプリです。操作は `ScreenImageMonitor.exe` だけで完結し、BATファイルは使用しません。
 
-## v4の主な変更
+## v5の主な変更
+
+- 数字OCRルールと画像一致ルールの設定画面を完全に分離
+- 画像ルール選択時は数値条件・OCR項目を非表示
+- 画像ルールのテストボタンを「画像一致テスト」と明示
+- 監視一覧の「OCR生データ」を「判定詳細」へ変更
+- 画像ルールの判定詳細には登録PNG/JPEG名を表示し、OCRを実行しないことを明確化
 
 - カウンターをメイン画面から分離し、専用ポップアップで表示
 - メイン画面の「カウンター表示」から再表示可能
@@ -33,6 +39,11 @@ Windows画面の指定範囲を監視し、数字OCRまたは登録画像との�
 ```
 
 監視中の場合は自動停止後、設定画面とドラッグ選択画面が開きます。
+
+## 判定方式の違い
+
+- **数字OCR**: 監視範囲をTesseractで読み取り、数値条件で判定します。
+- **画像一致**: 登録したPNG/JPEGと監視範囲をOpenCVで比較し、一致率で判定します。Tesseract OCRは実行しません。
 
 ## 画像識別ルール
 
@@ -67,7 +78,7 @@ Actions
 成功後、実行結果画面のArtifactsから次を取得します。
 
 ```text
-ScreenImageMonitor-Windows-GUI-v4
+ScreenImageMonitor-Windows-GUI-v5
 ```
 
 Artifactを展開し、`ScreenImageMonitor.exe`を起動してください。

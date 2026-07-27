@@ -147,7 +147,7 @@ class MonitorWorker:
 
                         metric: str
                         active: bool
-                        raw_text = ""
+                        detail = ""
                         if rule.detector == "template":
                             gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
                             score, _location, _size = engine.calculate_template_match(
@@ -164,6 +164,12 @@ class MonitorWorker:
                             )
                             metric = f"{score:.3f}"
                             active = state.target_is_present
+                            template_name = (
+                                rule.template_path.name
+                                if rule.template_path is not None
+                                else "未登録"
+                            )
+                            detail = f"PNG/JPEG一致: {template_name}"
                         else:
                             number, raw_text = engine.recognize_number(frame, rule)
                             engine.evaluate_number_rule(
@@ -177,6 +183,7 @@ class MonitorWorker:
                             )
                             metric = "---" if number is None else f"{number:g}"
                             active = state.target_is_present
+                            detail = f"OCR: {raw_text}" if raw_text else "OCR待機"
 
                         status_rows.append(
                             {
@@ -184,7 +191,7 @@ class MonitorWorker:
                                 "detector": rule.detector,
                                 "action": rule.action,
                                 "metric": metric,
-                                "ocr_text": raw_text,
+                                "detail": detail,
                                 "active": active,
                                 "count": state.count,
                             }
@@ -495,7 +502,7 @@ class MainApplication:
             "action",
             "metric",
             "state",
-            "ocr",
+            "detail",
         )
         self.tree = ttk.Treeview(
             summary,
@@ -509,14 +516,14 @@ class MainApplication:
         self.tree.heading("action", text="動作")
         self.tree.heading("metric", text="現在値／一致率")
         self.tree.heading("state", text="状態")
-        self.tree.heading("ocr", text="OCR生データ")
+        self.tree.heading("detail", text="判定詳細")
 
         self.tree.column("#0", width=230, minwidth=150)
         self.tree.column("detector", width=100, anchor="center")
         self.tree.column("action", width=100, anchor="center")
         self.tree.column("metric", width=140, anchor="center")
         self.tree.column("state", width=100, anchor="center")
-        self.tree.column("ocr", width=330)
+        self.tree.column("detail", width=330)
 
         scrollbar = ttk.Scrollbar(
             summary,
@@ -622,7 +629,7 @@ class MainApplication:
                     "カウント" if rule.action == "count" else "音通知",
                     "---",
                     "停止",
-                    "",
+                    "OCR待機" if rule.detector == "number" else "PNG/JPEG画像一致",
                 ),
             )
 
@@ -858,7 +865,7 @@ class MainApplication:
                     action,
                     row["metric"],
                     state,
-                    str(row.get("ocr_text", ""))[:80],
+                    str(row.get("detail", ""))[:80],
                 ),
             )
         self.summary_var.set(
