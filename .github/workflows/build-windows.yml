@@ -77,6 +77,7 @@ jobs:
 
           python -c "import tkinter; from PIL import Image, ImageTk; import cv2, mss, numpy, pytesseract, PyInstaller; print('Import check OK')"
           python -c "import screen_image_monitor as app; c=app.load_config(); print('rules=', len(c.rules), 'mode=', c.coordinate_mode)"
+          python -c "from pathlib import Path; setup=Path('screen_setup_gui.py').read_text(encoding='utf-8'); main=Path('screen_image_monitor_gui.py').read_text(encoding='utf-8'); assert '数字OCRは実行しません' in setup; assert 'OCR生データ' not in main; assert '判定詳細' in main; print('Detector UI separation check OK')"
 
       - name: Run configuration smoke test
         shell: powershell
@@ -161,7 +162,7 @@ jobs:
       - name: Upload Windows package
         uses: actions/upload-artifact@v6
         with:
-          name: ScreenImageMonitor-Windows-GUI-v4
+          name: ScreenImageMonitor-Windows-GUI-v5
           path: package
           if-no-files-found: error
           retention-days: 14
