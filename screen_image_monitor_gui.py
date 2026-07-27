@@ -1068,9 +1068,14 @@ class MainApplication:
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == "--region-selector-helper":
-        if len(arguments) != 3:
+        if len(arguments) not in {3, 4}:
             return 2
-        return run_region_selector_helper(arguments[1], arguments[2])
+        selector_options = arguments[3] if len(arguments) == 4 else None
+        return run_region_selector_helper(
+            arguments[1],
+            arguments[2],
+            selector_options,
+        )
 
     set_dpi_awareness()
     root = tk.Tk()

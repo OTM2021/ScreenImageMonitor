@@ -1,18 +1,18 @@
-ScreenImageMonitor v6.6 修正パッチ
+ScreenImageMonitor v6.6.1 完全修正パッチ
 
-変更内容:
-- 数値条件を日本語表示へ変更
-- 「値 / 範囲」を条件別の1入力欄へ変更
-- 範囲を 1-10 の形式で入力可能
-- 「OCR結果に指定範囲の数値を含む」を追加
-- OCR結果 121.1 を範囲 120-129 で検知可能
-- 数字OCRテストで、読み取った数値と条件一致結果を表示
+このパッチは、v6.6パッチで不足していた以下の必須ファイルを含みます。
+- image_file_io.py
+- unicode_image_io_smoke_test.py
+
+また、GitHub ActionsのWorkflowが参照するPythonファイルをすべて同梱しています。
+そのため、過去のパッチ適用状況に関係なく、ソース／検査ファイルをまとめて揃えられます。
 
 適用方法:
-1. このZIPを展開します。
-2. 中身をGitHubリポジトリ直下へ上書きアップロードします。
+1. ZIPを展開します。
+2. 展開した中身をGitHubリポジトリ直下へまとめて上書きアップロードします。
 3. Commit changesを押します。
-4. ActionsからBuild Windows Integrated GUI EXEを実行します。
-5. Artifact「ScreenImageMonitor-Windows-GUI-v6.6」を取得します。
+4. Actions → Build Windows Integrated GUI EXE → Run workflow を実行します。
+5. Artifact「ScreenImageMonitor-Windows-GUI-v6.6.1」をダウンロードします。
 
-config.jsonとcounts.jsonはパッチに含まれていないため、既存設定とカウントは維持されます。
+このパッチには config.json、counts.json、templates、sounds、samples、evidence を含めていません。
+既存のルール設定、カウント、登録画像、音声ファイルは上書きされません。
