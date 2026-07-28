@@ -12,18 +12,19 @@
       "sound_enabled": true,
       "sound": "sounds/alert.wav",
       "region": {
-        "left": 2428,
-        "top": 1181,
-        "width": 148,
-        "height": 37
+        "left": 1559,
+        "top": 552,
+        "width": 27,
+        "height": 16
       },
       "required_matches": 2,
       "save_evidence": false,
       "condition": {
-        "operator": "eq",
-        "value": 1234.0,
+        "operator": "between",
         "tolerance": 0,
-        "trigger_on_initial": false
+        "trigger_on_initial": false,
+        "minimum": 130.0,
+        "maximum": 140.0
       },
       "ocr": {
         "psm": 7,
@@ -43,16 +44,16 @@
       "sound_enabled": false,
       "sound": "sounds/alert.wav",
       "region": {
-        "left": 0,
-        "top": 0,
-        "width": 682,
-        "height": 488
+        "left": 849,
+        "top": 321,
+        "width": 786,
+        "height": 430
       },
       "required_matches": 2,
       "save_evidence": true,
-      "template": "templates/c_2026-07-27_181853.png",
-      "match_threshold": 0.85,
-      "release_threshold": 0.75
+      "template": "templates/ルール2_スクリーンショット_2026-07-28_011846_2.png",
+      "match_threshold": 0.7,
+      "release_threshold": 0.6499999999999999
     }
   ]
 }
